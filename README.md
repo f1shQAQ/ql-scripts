@@ -21,7 +21,14 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 依赖：在「依赖管理 → Python3」里添加 `requests`（青龙一般自带）。
 
-推送：脚本调用青龙自带的 `notify.py`。在「配置文件」里填推送渠道（Telegram、Server 酱、PushPlus 等）即可。
+推送：默认走面板「系统设置 → 通知设置」（需要青龙 2.18+）。这条推送失败时，改用青龙自带的 `notify.py`，它读「配置文件」里的 `TG_BOT_TOKEN`、`PUSH_KEY` 等变量。用环境变量 `QL_NOTIFY_MODE` 可以改推送方式：
+
+| 值 | 推送方式 |
+|---|---|
+| `auto`（默认） | 先走面板通知设置，失败再走 notify.py |
+| `system` | 只走面板通知设置 |
+| `script` | 只走 notify.py |
+| `off` | 不推送，只打印到日志 |
 
 ## 环境变量
 

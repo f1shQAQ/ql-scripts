@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import re
 import sys
@@ -13,12 +14,6 @@ import time
 from typing import Any, Callable, Iterable
 
 import requests
-
-# 青龙会把它自带的 notify.py 放在脚本目录；本地运行时没有它，就只打印。
-try:
-    from notify import send as _ql_send  # type: ignore
-except Exception:  # noqa: BLE001
-    _ql_send = None
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -101,15 +96,55 @@ def find_key(obj: Any, key: str) -> Any:
     return None
 
 
-def notify(title: str, content: str) -> None:
-    print(f"\n===== {title} =====\n{content}")
-    if _ql_send is None:
-        print("（没有找到青龙的 notify.py，只打印不推送）")
-        return
+def _system_notify(title: str, content: str) -> bool:
+    """走面板「系统设置 → 通知设置」。需要青龙 2.18+，它会注入全局 QLAPI。"""
+    api = getattr(builtins, "QLAPI", None)
+    if api is None or not hasattr(api, "systemNotify"):
+        print("当前青龙没有 QLAPI.systemNotify（需要 2.18+）")
+        return False
     try:
-        _ql_send(title, content)
+        resp = api.systemNotify({"title": title, "content": content})
     except Exception as e:  # noqa: BLE001
-        print(f"推送失败：{e}")
+        print(f"面板通知失败：{e}")
+        return False
+    if isinstance(resp, dict) and resp.get("code") == 200:
+        print("已通过面板「通知设置」推送")
+        return True
+    print(f"面板通知没有发出：{resp}（检查「系统设置 → 通知设置」）")
+    return False
+
+
+def _script_notify(title: str, content: str) -> bool:
+    """走青龙自带的 notify.py，它读「配置文件」里的 TG_BOT_TOKEN、PUSH_KEY 等变量。"""
+    try:
+        from notify import send  # type: ignore
+    except Exception:  # noqa: BLE001
+        print("没有找到青龙的 notify.py")
+        return False
+    try:
+        send(title, content)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"notify.py 推送失败：{e}")
+        return False
+
+
+def notify(title: str, content: str) -> None:
+    """推送结果。QL_NOTIFY_MODE 选择方式：
+
+    auto（默认）  先走面板通知设置，失败再走 notify.py
+    system        只走面板通知设置
+    script        只走 notify.py
+    off           不推送，只打印
+    """
+    print(f"\n===== {title} =====\n{content}\n")
+    mode = os.getenv("QL_NOTIFY_MODE", "auto").strip().lower()
+    if mode == "off":
+        return
+    if mode in ("auto", "system") and _system_notify(title, content):
+        return
+    if mode in ("auto", "script"):
+        _script_notify(title, content)
 
 
 def run_accounts(
