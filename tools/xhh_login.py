@@ -100,6 +100,8 @@ class AppLogin:
         self.imei = imei
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": APP_UA, "Accept": "application/json"})
+        # 设备指纹同时放 Cookie 和查询参数，和 App / 网页两种读法都对得上
+        self.s.cookies.update({"x_xhh_tokenid": token_id})
 
     def sign(self, path: str) -> dict:
         r = self.s.get(self.hkey_api, params={
@@ -113,6 +115,7 @@ class AppLogin:
         query = {
             **APP_PROFILE,
             "imei": self.imei,
+            "device_id": self.imei,
             "device_info": "M2012K11AC",
             "os_version": "13",
             "dw": "600",
