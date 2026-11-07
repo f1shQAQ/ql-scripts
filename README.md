@@ -7,7 +7,7 @@
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
 | `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
-| `checkin_xiaoheihe.py` | 小黑盒签到，汇报每日任务和 H 币（本地签名，无需第三方服务） | 每天 08:45 | `XHH_COOKIE` |
+| `checkin_xiaoheihe.py` | 小黑盒签到 + 分享类任务，汇报任务进度和 H 币 | 每天 08:45 | `XHH_COOKIE` |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
@@ -66,7 +66,7 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `XHH_COOKIE` | 无 | 登录凭据 + 设备字段，见下面「获取 XHH_COOKIE」。多个账号用换行或 `&&` 分隔。 |
+| `XHH_COOKIE` | 无 | App 登录态 + 设备字段。获取方法见 [小黑盒 Cookie 获取指南](docs/xiaoheihe-cookie.md)。多个账号用换行或 `&&` 分隔。 |
 | `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 计算 App 签名和加密上报的服务地址，见下面说明。 |
 | `XHH_SHARE_TASKS` | `true` | `false` 时只签到，不做分享类任务。 |
 
@@ -89,44 +89,13 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 #### 获取 XHH_COOKIE
 
-**推荐：手机号登录（直接拿 App 登录态，不用抓包）**
+Cookie 必须是 **App 登录态**：网页扫码拿到的只能在 Web 通道读数据，签到会被拒。
 
-```bash
-python tools/xhh_login.py --phone 138xxxxxxxx
-```
+三种获取方式（手机号登录 / 扫码 / 抓包）、字段说明、常见报错和排查步骤，都整理在单独的文档里：
 
-输入手机收到的验证码，脚本会输出一整行 `XHH_COOKIE`，直接填进青龙即可。手机号和验证码只发往小黑盒官方接口，不经过第三方，也不会被保存。
+👉 **[小黑盒 Cookie 获取指南](docs/xiaoheihe-cookie.md)**
 
-**备选：扫码登录（只能读数据，签不了到）**
-
-```bash
-pip install qrcode          # 只在这台电脑用
-python tools/xhh_cookie.py  # 终端显示二维码，用小黑盒 App 扫
-```
-
-适合先验证账号、看任务和 H 币。签到仍然需要上面那种 App 登录态。
-
-**备选：手动粘贴 / 抓包**
-
-网页 Cookie 同样只能读，`python tools/xhh_cookie.py --cookie "..."` 支持的格式有 cURL、Cookie 请求头、Cookie-Editor 导出的 JSON、cookies.txt。
-
-抓 App 包（Reqable / HttpCanary / 安卓模拟器）能拿到 App 登录态，从请求头 Cookie 里复制 `pkey` 和 `x_xhh_tokenid`，再从查询参数里抄设备字段：
-
-```
-pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=13;dw=411;channel=heybox_xiaomi
-```
-
-- `pkey`：身份凭据，`heybox_id` 会从中自动解析，不用单独填。
-- `x_xhh_tokenid`：数美设备指纹，App 写操作会校验。
-- `imei` / `device_info` / `os_version` / `dw`：设备字段，照抄请求参数；`channel` 可选。
-
-**排查工具**
-
-签到仍然失败时，用诊断脚本把真实接口返回打出来（会真的调签到接口）：
-
-```bash
-python tools/xhh_probe.py --cookie "你的 XHH_COOKIE"
-```
+拿到后直接填青龙环境变量 `XHH_COOKIE`。
 
 #### 关于 hkey 签名服务
 
