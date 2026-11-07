@@ -242,14 +242,72 @@ class Web:
         return f"{status} {progress}/{maximum}（本次搜索 {done} 次）"
 
     # ---- 每日活动 ----
-    def report_action(self) -> tuple[str, str]:
+    def earn_page(self) -> str:
+        r = self.s.get(f"{REWARDS}/earn", timeout=20)
+        if "/earn" not in r.url:
+            print(f"打开 /earn 被跳转到 {r.url[:80]}")
+        return r.text
+
+    @staticmethod
+    def flight_text(page: str) -> str:
+        """把页面里 self.__next_f.push([1,"..."]) 的 RSC 数据解码并拼起来。"""
+        parts = []
+        for m in re.finditer(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)', page):
+            try:
+                parts.append(json.loads(m.group(1)))
+            except ValueError:
+                continue
+        return "".join(parts)
+
+    @staticmethod
+    def _enclosing_object(text: str, pos: int) -> dict | None:
+        """找出包住 pos 的最小 JSON 对象。"""
+        depth = 0
+        for start in range(pos, max(pos - 20000, -1), -1):
+            ch = text[start]
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                if depth == 0:
+                    try:
+                        obj, _ = json.JSONDecoder().raw_decode(text, start)
+                        return obj if isinstance(obj, dict) else None
+                    except ValueError:
+                        return None
+                depth -= 1
+        return None
+
+    def earn_offers(self, page: str) -> list[dict]:
+        """从 /earn 页面的 RSC 数据里取任务（含新版 hash），取不到时返回空列表。"""
+        text = self.flight_text(page)
+        today = datetime.now().strftime("%Y-%m-%d")
+        offers: dict[str, dict] = {}
+        for m in re.finditer(r'"offerId":"', text):
+            obj = self._enclosing_object(text, m.start())
+            if not obj or not obj.get("offerId"):
+                continue
+            cur = offers.setdefault(obj["offerId"], {})
+            for k, v in obj.items():
+                if v not in (None, "") and k not in cur:
+                    cur[k] = v
+        result = []
+        for o in offers.values():
+            done = o.get("isCompleted") is True or o.get("complete") is True
+            date = str(o.get("date") or "")[:10]
+            if done or o.get("isLocked") is True or not o.get("hash"):
+                continue
+            if date and re.match(r"\d{4}-\d{2}-\d{2}$", date) and date > today:
+                continue
+            result.append(o)
+        return result
+
+    def report_action(self, page: str) -> tuple[str, str]:
         """新版 rewards.bing.com（Next.js）用 server action 上报活动。
 
-        action ID 每次网站发版都会变，所以每次从 /earn 页面引用的 JS 里现找。
+        action ID 每次网站发版都会变，所以每次从页面引用的 JS 里现找。
         返回 (action ID, 部署号)，找不到时 action ID 为空。
         """
-        page = self.s.get(f"{REWARDS}/earn", timeout=20).text
-        page += self.s.get(f"{REWARDS}/about", timeout=20).text  # 公共 JS 也在这里，/earn 没拿到时兜底
+        page += self.s.get(f"{REWARDS}/about", timeout=20).text  # 公共 JS 也在这里，兜底
         dpl = re.search(r"[?&](?:amp;)?dpl=([\w.-]+)", page) or re.search(r'data-dpl-id="([\w.-]+)"', page)
         chunks = list(dict.fromkeys(re.findall(r"(/_next/static/chunks/[\w\-./()]+?\.js)", page)))
         pattern = re.compile(r'createServerReference\)\("([a-f0-9]{40,64})"[^;]{0,300}?"reportActivity"\)')
@@ -262,7 +320,7 @@ class Web:
                 return m.group(1), dpl.group(1) if dpl else ""
         return "", dpl.group(1) if dpl else ""
 
-    def report_once(self, action_id: str, dpl: str, promo: dict) -> bool:
+    def report_once(self, action_id: str, dpl: str, promo: dict) -> tuple[bool, str]:
         tree = ["", {"children": ["(nav)", {"children": ["earn", {"children": ["__PAGE__", {}, None, None, 0]},
                                                          None, None, 0]}, None, None, 0]}, None, None, 16]
         headers = {
@@ -275,20 +333,27 @@ class Web:
         }
         if dpl:
             headers["X-Deployment-Id"] = dpl
+        attrs = promo.get("attributes") if isinstance(promo.get("attributes"), dict) else {}
         try:
-            activity_type = int(promo.get("activityType") or 11)
+            activity_type = int(promo.get("activityType") or attrs.get("activityType") or 11)
         except (TypeError, ValueError):
             activity_type = 11
+        promotional = promo.get("isPromotional")
+        if promotional is None:
+            promotional = attrs.get("promotional")
+        promotional = promotional is True or str(promotional).lower() == "true"
         offset = str(int(-(datetime.now().astimezone().utcoffset().total_seconds()) // 60))
         body = [
             promo["hash"],
             activity_type,
-            {"offerid": promo["offerId"], "isPromotional": True if promo.get("isPromotional") else "$undefined",
+            {"offerid": promo["offerId"], "isPromotional": True if promotional else "$undefined",
              "timezoneOffset": offset},
         ]
         r = self.s.post(f"{REWARDS}/earn", data=json.dumps(body, ensure_ascii=False).encode(), headers=headers,
-                        timeout=20)
-        return r.status_code < 300 and bool(re.search(r"^\d+:true\s*$", r.text, re.M))
+                        timeout=20, allow_redirects=False)
+        ok = r.status_code < 300 and bool(re.search(r"^\d+:true\s*$", r.text, re.M))
+        detail = f"HTTP {r.status_code} {r.headers.get('content-type', '')[:30]} {r.text[:120]!r}"
+        return ok, detail
 
     @staticmethod
     def today_promotions(dash: dict) -> list[dict]:
@@ -301,32 +366,46 @@ class Web:
         return promos + list(dash.get("morePromotions") or [])
 
     def do_activities(self) -> str:
-        dash = self.userinfo()
-        todo = [
-            p
-            for p in self.today_promotions(dash)
-            if not p.get("complete")
-            and int(p.get("priority") or 0) > -2
-            and p.get("exclusiveLockedFeatureStatus") != "locked"
-            and p.get("offerId")
-            and p.get("hash")
-        ]
+        page = self.earn_page()
+        todo = self.earn_offers(page)
+        source = "/earn"
+        if not todo:  # 新版页面没解析出来时，用旧接口的数据
+            source = "getuserinfo"
+            todo = [
+                p
+                for p in self.today_promotions(self.userinfo())
+                if not p.get("complete")
+                and int(p.get("priority") or 0) > -2
+                and p.get("exclusiveLockedFeatureStatus") != "locked"
+                and p.get("offerId")
+                and p.get("hash")
+            ]
         if not todo:
             return "没有待完成的活动"
-        action_id, dpl = self.report_action()
+        print(f"待完成活动 {len(todo)} 个（来源：{source}）")
+        action_id, dpl = self.report_action(page)
         if not action_id:
             return f"待完成 {len(todo)} 个，但没在网页 JS 里找到 reportActivity（网站可能又改版了），跳过"
         print(f"reportActivity action：{action_id[:12]}…，部署号：{dpl or '未知'}")
-        for p in todo:
-            ok = self.report_once(action_id, dpl, p)
+        for i, p in enumerate(todo):
+            ok, detail = self.report_once(action_id, dpl, p)
             print(f"上报 {p['offerId']}：{'服务器已确认' if ok else '服务器没确认'}")
+            if not ok and i < 2:
+                print(f"  响应：{detail}")
             time.sleep(3)
         after = {p.get("offerId"): p for p in self.today_promotions(self.userinfo())}
-        done = sum(1 for p in todo if (after.get(p["offerId"]) or {}).get("complete"))
-        left = [p.get("title") or p["offerId"] for p in todo if not (after.get(p["offerId"]) or {}).get("complete")]
+        remaining = {o["offerId"] for o in self.earn_offers(self.earn_page())} if source == "/earn" else set()
+
+        def finished(p: dict) -> bool:
+            if source == "/earn":
+                return p["offerId"] not in remaining
+            return bool((after.get(p["offerId"]) or {}).get("complete"))
+
+        done = sum(1 for p in todo if finished(p))
+        left = [p.get("title") or p["offerId"] for p in todo if not finished(p)]
         text = f"完成 {done}/{len(todo)}"
         if left:
-            text += f"，未完成：{'、'.join(left[:5])}（测验类第二版再做）"
+            text += f"，未完成：{'、'.join(left[:5])}"
         return text
 
 
