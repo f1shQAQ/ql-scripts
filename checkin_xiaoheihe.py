@@ -354,20 +354,11 @@ class XiaoHeiHe:
 
 
 def sign_with_fallback(cookie: str, hkey_api: str, account: XiaoHeiHe) -> str:
-    """Web 通道签到被拒时，用 App 通道补一次。"""
+    """签到一次。网页登录态在 App 通道不可用，失败时直接给出可读原因。"""
     try:
         return account.sign()
     except SignError as error:
-        if account.channel != "web":
-            return f"失败（{error}）"
-        try:
-            alt = XiaoHeiHe(cookie, hkey_api, channel="app")
-        except Exception as alt_error:  # noqa: BLE001
-            return f"失败（{error}；切 App 通道失败：{alt_error}）"
-        try:
-            return f"{alt.sign()}（Web 被拒，改用 App 通道）"
-        except SignError as alt_error:
-            return f"失败（{error}；App 通道：{alt_error}）"
+        return f"失败（{error}）"
 
 
 def open_account(cookie: str, hkey_api: str) -> tuple[XiaoHeiHe, dict]:

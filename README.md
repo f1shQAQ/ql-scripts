@@ -74,7 +74,13 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 - **Web 通道（默认）**：签名在本地算，不依赖任何第三方服务，Cookie 只要 `pkey`。扫码登录拿到的就是这种。读任务列表、查 H 币都走这条。
 - **App 通道**：用抓包来的 Cookie + 设备字段，签名得找外部 hkey 服务。设备字段齐全且有 `x_xhh_tokenid` 时优先走这条。
 
-签到属于写操作，风控比读取严。Web 通道签到如果被拒（返回「非法的请求」），脚本会自动改用 App 通道补签一次，日志里会注明。两条都被拒时，通常是缺浏览器生成的 `x_xhh_tokenid`（数美设备指纹），见下面「补充 x_xhh_tokenid」。
+签到属于写操作，风控比读取严。实测**网页扫码拿到的 pkey 在 App 通道不可用**（会返回「请重新登录」），所以只有抓包拿到 App 登录态时才走 App 通道；Web 通道签到如果返回「非法的请求」，在本地跑一下诊断工具，把输出发出来即可定位：
+
+```bash
+python tools/xhh_probe.py --cookie "你的 XHH_COOKIE"
+```
+
+它会依次尝试官网 / 账号中心 / 手机 UA 等几组参数并打印服务端真实返回（会真的调签到接口）。也可能补充 `x_xhh_tokenid`（数美设备指纹）才有用，见下面说明。
 
 #### 获取 XHH_COOKIE
 
