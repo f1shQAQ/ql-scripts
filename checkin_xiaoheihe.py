@@ -3,23 +3,29 @@
 cron: 45 8 * * *
 new Env('小黑盒签到')
 
-小黑盒每日签到：App 通道签到（/task/sign_v3/sign），顺便汇报每日任务完成情况和 H 币余额。
+小黑盒每日签到：走 /task/sign_v3/sign，顺便汇报每日任务完成情况和 H 币余额。
+
+两条通道，脚本自动选：
+  Web 通道（默认，推荐）：本地算签名，不需要第三方服务，Cookie 只要 pkey。
+  App 通道：需要抓包拿到的 Cookie + 设备字段，签名得靠外部 hkey 服务（XHH_HKEY_API）。
 
 环境变量：
-    XHH_COOKIE     App 抓包拿到的 Cookie + 设备字段，格式：
-                   pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=16;dw=411;channel=heybox_xiaomi
-                   必须有 pkey 和 x_xhh_tokenid（身份），以及 imei、device_info、os_version、dw（设备）。
-                   heybox_id 从 pkey 自动解析，不用填。多个账号用换行或 "&&" 分隔。
-    XHH_HKEY_API   计算 App 签名（hkey/_rnd）的服务地址，默认 https://hkey.qcciii.com/hkey。
-                   这是第三方服务：它只会收到 heybox_id、imei、接口路径和时间戳，收不到 Cookie；
-                   但服务挂了脚本就不能用。可以自己搭一个同协议的服务换掉。
+    XHH_COOKIE     两种写法都行：
+                    Web 登录态：pkey=xxx（tools/xhh_cookie.py 扫码生成的就是这种）
+                    App 抓包： pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=16;dw=411
+                    heybox_id 从 pkey 自动解析，不用填。多个账号用换行或 "&&" 分隔。
+    XHH_HKEY_API    只在 App 通道用：计算 App 签名（hkey/_rnd）的服务地址，默认
+                    https://hkey.qcciii.com/hkey。第三方服务，只会收到 heybox_id、imei、
+                    接口路径和时间戳，收不到 Cookie；服务挂了 App 通道就不可用。
 
-接口参考 yowiv08/heybox（GitHub）的 heybox_sign.js。
+接口参考 yowiv08/heybox（GitHub）的 heybox_sign.js；Web 签名算法来自公开的逆向分析。
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import os
 import random
 import re
@@ -36,6 +42,11 @@ APP_UA = (
     "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/41.0.2272.118 Safari/537.36 ApiMaxJia/1.0"
 )
+WEB_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+WEB_ORIGIN = "https://xiaoheihe.cn"
 
 # App 请求固定的查询参数（设备相关字段单独填）
 APP_PROFILE = {
@@ -45,6 +56,95 @@ APP_PROFILE = {
     "x_app": "heybox",
     "time_zone": "Asia/Shanghai",
 }
+
+# Web 请求固定的查询参数（x_client_type=weboutapp 是网页版任务中心用的那套，实测能过签名校验）
+WEB_PROFILE = {
+    "os_type": "web",
+    "app": "heybox",
+    "x_client_type": "weboutapp",
+    "x_client_version": "",
+    "x_os_type": "Windows",
+    "x_app": "heybox",
+}
+
+WEB_CHARSET = "AB45STUVWZEFGJ6CH01D237IXYPQRKLMN89"
+WEB_RND_KEY = "Z7mFG4tQp9Ws2LxB8H"
+
+
+# ---- Web 通道签名（纯本地，无外部依赖）----
+def _map_all(text: str, pool: str) -> str:
+    return "".join(pool[ord(char) % len(pool)] for char in text)
+
+
+def _map_head(text: str, pool: str, cut: int) -> str:
+    sub = pool[:cut]
+    return "".join(sub[ord(char) % len(sub)] for char in text)
+
+
+def _interleave(parts: list[str]) -> str:
+    longest = max(len(part) for part in parts)
+    return "".join(part[i] for i in range(longest) for part in parts if i < len(part))
+
+
+def _double(value: int) -> int:
+    return ((value << 1) ^ 27) & 255 if value & 128 else value << 1
+
+
+def _add(value: int) -> int:
+    return _double(value) ^ value
+
+
+def _spread(value: int) -> int:
+    return _add(_double(value))
+
+
+def _fold(value: int) -> int:
+    return _spread(_add(_double(value)))
+
+
+def _shift(value: int) -> int:
+    return _fold(value) ^ _spread(value) ^ _add(value)
+
+
+def _mix_column(values: list[int]) -> list[int]:
+    a, b, c, d = values[:4]
+    values[:4] = [
+        _shift(a) ^ _fold(b) ^ _spread(c) ^ _add(d),
+        _add(a) ^ _shift(b) ^ _fold(c) ^ _spread(d),
+        _spread(a) ^ _add(b) ^ _shift(c) ^ _fold(d),
+        _fold(a) ^ _spread(b) ^ _add(c) ^ _shift(d),
+    ]
+    return values
+
+
+def web_hkey(path: str, timestamp: int, nonce: str) -> str:
+    """Web 通道的 hkey：路径 + 时间 + nonce 做两轮字符映射后取 MD5。"""
+    normalized = "/" + "/".join(part for part in path.split("/") if part) + "/"
+    mixed = _interleave([
+        _map_head(str(timestamp + 1), WEB_CHARSET, -2),
+        _map_all(normalized, WEB_CHARSET),
+        _map_all(nonce, WEB_CHARSET),
+    ])[:20]
+    digest = hashlib.md5(mixed.encode()).hexdigest()
+    values = _mix_column([ord(char) for char in digest[-6:]])
+    return _map_head(digest[:5], WEB_CHARSET, -4) + f"{sum(values) % 100:02d}"
+
+
+def web_rnd(nonce: str, timestamp: int) -> str:
+    message = (WEB_RND_KEY + nonce + f"{timestamp}:{nonce}").encode()
+    return "15:" + hmac.new(WEB_RND_KEY.encode(), message, hashlib.sha256).hexdigest()
+
+
+def web_sign(path: str) -> dict[str, str]:
+    now = int(time.time())
+    nonce = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+    return {
+        "_time": str(now),
+        "nonce": nonce,
+        "hkey": web_hkey(path, now, nonce),
+        "_rnd": web_rnd(nonce, now),
+        "version": "999.0.4",
+    }
 
 
 def env_str(name: str, default: str = "") -> str:
@@ -69,37 +169,60 @@ def heybox_id_from_pkey(pkey: str) -> str:
 
 
 class XiaoHeiHe:
-    def __init__(self, cookie: str, hkey_api: str):
+    def __init__(self, cookie: str, hkey_api: str, channel: str = "auto"):
         fields = parse_cookie(cookie)
-        pkey = fields.get("pkey", "")
+        pkey = fields.get("pkey") or fields.get("user_pkey", "")
         token_id = fields.get("x_xhh_tokenid", "")
-        missing = [k for k, v in {
-            "pkey": pkey, "x_xhh_tokenid": token_id, "imei": fields.get("imei", ""),
-            "device_info": fields.get("device_info", ""), "os_version": fields.get("os_version", ""),
-            "dw": fields.get("dw", ""),
-        }.items() if not v]
-        if missing:
-            raise ValueError(f"Cookie 里缺少 {'、'.join(missing)}（格式见脚本开头的说明）")
+        device = {key: fields.get(key, "") for key in ("imei", "device_info", "os_version", "dw")}
+        if not pkey:
+            raise ValueError("Cookie 里缺少 pkey（扫码工具生成的或抓包拿到的登录凭据）")
 
         self.heybox_id = heybox_id_from_pkey(pkey)
         if not self.heybox_id:
             raise ValueError("无法从 pkey 解析出 heybox_id，检查 pkey 是否复制完整")
 
-        self.hkey_api = hkey_api
-        self.profile = dict(APP_PROFILE)
-        self.profile.update({
-            "imei": fields["imei"],
-            "device_info": fields["device_info"],
-            "os_version": fields["os_version"],
-            "dw": fields["dw"],
-        })
-        if fields.get("channel"):
-            self.profile["channel"] = fields["channel"]
+        # 有完整设备字段和 x_xhh_tokenid 的是抓包来的 App 登录态，先走 App 通道；
+        # 其余（网页扫码拿到的）直接走 Web 通道，不需要设备字段，也不需要外部签名服务。
+        if channel == "auto":
+            channel = "app" if (token_id and all(device.values())) else "web"
+        if channel == "app" and not all(device.values()):
+            raise ValueError("App 通道需要 imei、device_info、os_version、dw 四个设备字段")
 
-        self.s = new_session({"User-Agent": APP_UA, "Referer": "http://api.maxjia.com/", "Accept": "application/json"})
-        self.s.cookies.update({"pkey": pkey, "x_xhh_tokenid": token_id})
+        self.channel = channel
+        self.hkey_api = hkey_api
         self.version = ""
         self.build = ""
+
+        if channel == "app":
+            self.profile = {**APP_PROFILE, **device}
+            if fields.get("channel"):
+                self.profile["channel"] = fields["channel"]
+            self.s = new_session({
+                "User-Agent": APP_UA,
+                "Referer": "http://api.maxjia.com/",
+                "Accept": "application/json",
+            })
+        else:
+            self.profile = dict(WEB_PROFILE)
+            self.s = new_session({
+                "User-Agent": WEB_UA,
+                "Referer": f"{WEB_ORIGIN}/",
+                "Origin": WEB_ORIGIN,
+                "Accept": "application/json, text/plain, */*",
+            })
+
+        if channel == "app":
+            self.s.cookies.update({"pkey": pkey})
+        else:
+            # 网页端四种写法都会带，服务端读哪个都能命中
+            self.s.cookies.update({
+                "pkey": pkey,
+                "user_pkey": pkey,
+                "heybox_id": self.heybox_id,
+                "user_heybox_id": self.heybox_id,
+            })
+        if token_id:
+            self.s.cookies.update({"x_xhh_tokenid": token_id})
 
     # ---- App 签名 ----
     def request_hkey(self, path: str, time_sec: int) -> dict:
@@ -125,6 +248,15 @@ class XiaoHeiHe:
         return result
 
     def build_query(self, path: str, extra: dict | None = None) -> dict:
+        if self.channel == "web":
+            query = {
+                **self.profile,
+                "heybox_id": self.heybox_id,
+                **web_sign(path),
+                **(extra or {}),
+            }
+            return {k: v for k, v in query.items() if v}
+
         time_sec = int(time.time())
         hk = self.request_hkey(path, time_sec)
         query = {
@@ -205,13 +337,34 @@ class XiaoHeiHe:
         return "成功，" + "，".join(parts) if parts else "成功"
 
 
+def open_account(cookie: str, hkey_api: str) -> tuple[XiaoHeiHe, dict]:
+    """按 Cookie 形态挑通道，探测失败自动换另一条。"""
+    fields = parse_cookie(cookie)
+    has_device = all(fields.get(key) for key in ("imei", "device_info", "os_version", "dw"))
+    prefer_app = bool(fields.get("x_xhh_tokenid")) and has_device
+
+    problems: list[str] = []
+    for channel in (["app", "web"] if prefer_app else ["web", "app"]):
+        if channel == "app" and not has_device:
+            continue
+        try:
+            account = XiaoHeiHe(cookie, hkey_api, channel=channel)
+            snapshot = account.task_list()
+        except Exception as error:  # noqa: BLE001
+            problems.append(f"{channel} 通道：{error}")
+            continue
+        return account, snapshot
+    raise RuntimeError("；".join(problems) or "登录失败，检查 Cookie 是否有效")
+
+
 def handle(cookie: str, _index: int) -> str:
-    xhh = XiaoHeiHe(cookie, env_str("XHH_HKEY_API", DEFAULT_HKEY_API))
+    xhh, snapshot = open_account(cookie, env_str("XHH_HKEY_API", DEFAULT_HKEY_API))
 
-    snapshot = xhh.task_list()
-
-    result: list[tuple[str, object]] = [("账号", snapshot["username"] or f"ID {xhh.heybox_id}")]
-    result.append(("签到", xhh.sign()))
+    result: list[tuple[str, object]] = [
+        ("账号", snapshot["username"] or f"ID {xhh.heybox_id}"),
+        ("通道", "Web（本地签名）" if xhh.channel == "web" else "App（hkey 服务）"),
+        ("签到", xhh.sign()),
+    ]
 
     # 签到完再看一眼任务和 H 币
     time.sleep(1)

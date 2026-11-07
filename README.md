@@ -7,7 +7,7 @@
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
 | `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
-| `checkin_xiaoheihe.py` | 小黑盒 App 签到，汇报每日任务和 H 币 | 每天 08:45 | `XHH_COOKIE` 等 |
+| `checkin_xiaoheihe.py` | 小黑盒签到，汇报每日任务和 H 币（本地签名，无需第三方服务） | 每天 08:45 | `XHH_COOKIE` |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
@@ -66,28 +66,62 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `XHH_COOKIE` | 无 | App 请求的 Cookie + 设备字段，见下面「获取 XHH_COOKIE」。多个账号用换行或 `&&` 分隔。 |
-| `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 计算 App 签名（hkey）的服务地址，见下面说明。 |
+| `XHH_COOKIE` | 无 | 登录凭据，网页扫码的 `pkey=xxx` 就够（也认 `user_pkey`）。多个账号用换行或 `&&` 分隔。 |
+| `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 只在 App 通道用：计算 App 签名的服务地址，见下面说明。 |
+
+脚本有两条通道，会按 Cookie 形态自动选，一条失败自动换另一条：
+
+- **Web 通道（默认）**：签名在本地算，不依赖任何第三方服务，Cookie 只要 `pkey`。扫码登录拿到的就是这种。
+- **App 通道**：用抓包来的 Cookie + 设备字段，签名得找外部 hkey 服务。设备字段齐全且有 `x_xhh_tokenid` 时优先走这条。
 
 #### 获取 XHH_COOKIE
 
-小黑盒的签到接口只认 App 请求的签名，需要抓包 App。用 Reqable / HttpCanary 等工具抓 `api.xiaoheihe.cn` 的请求（登录后进「我 → 我的任务」），从请求头 Cookie 里复制 `pkey` 和 `x_xhh_tokenid`，再从同一请求的查询参数里抄设备字段，拼成一行：
+**推荐：脚本里扫码登录，不用抓包**
+
+小黑盒 App 有证书校验（SSL Pinning），没越狱的 iPhone、没 root 的安卓都抓不到包。所以这里走网页登录接口（不需要 App 签名）：
+
+1. 本地安装二维码库（只在这台电脑用，青龙上不需要）：`pip install qrcode`
+2. 运行：
+
+```bash
+python tools/xhh_cookie.py
+```
+
+3. 终端会显示二维码，用小黑盒 App 扫一下并在手机上确认。
+4. 脚本自动生成设备指纹（`imei` 按账号固定生成，同一账号每次一致），并试读一次任务列表确认能登录，最后输出可直接填进青龙的 `XHH_COOKIE`。
+
+设备指纹默认用一套安卓值，只对 App 通道有用，Web 通道会忽略。`--device iphone` 可以换成 iPhone 的机型参数，或者用 `--device-info`、`--os-version`、`--dw`、`--imei` 单独覆盖。扫码登录对账号只做一次，之后 Cookie 一直有效，直到你改密码或主动退出。
+
+扫码登录拿到的 Cookie 里没有 `x_xhh_tokenid`（这是浏览器里请求过接口才会有的字段），Web 通道用不上它，脚本会跳过。加 `--debug` 可以打印登录接口的原始返回，排查问题用。
+
+**备选：手动粘贴网页 Cookie**
+
+如果不想扫码，也可以在电脑浏览器登录 https://xiaoheihe.cn ，F12 → Network 点一个 `api.xiaoheihe.cn` 请求，右键 → Copy as cURL，然后：
+
+```bash
+python tools/xhh_cookie.py --cookie "把 cURL 整段粘在这里"
+```
+
+也可以直接粘 Cookie 请求头、Cookie-Editor 导出的 JSON 或 cookies.txt（`--file` 从文件读）。多个账号用 `&&` 分隔。
+
+**可选：抓 App 包**（走 App 通道，字段要真实）
+
+用 Reqable / HttpCanary 抓 `api.xiaoheihe.cn` 的请求（登录后进「我 → 我的任务」），从请求头 Cookie 里复制 `pkey` 和 `x_xhh_tokenid`，再从查询参数里抄设备字段，拼成一行：
 
 ```
 pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=13;dw=411;channel=heybox_xiaomi
 ```
 
 - `pkey`：身份凭据，`heybox_id` 会从中自动解析，不用单独填。
-- `x_xhh_tokenid`：身份凭据，缺了会请求失败。
-- `imei` / `device_info` / `os_version` / `dw` / `channel`：设备字段，从任意一个 App 请求的查询参数里照抄即可；`channel` 和 `dw` 可以省略，前四个不行。
+- `x_xhh_tokenid`：App 通道的身份凭据，有就带上；网页登录拿不到。
+- `imei` / `device_info` / `os_version` / `dw`：设备字段，从任意一个 App 请求的查询参数里照抄即可，走 App 通道时四个都不能省；`channel` 可选。
 
 #### 关于 hkey 签名服务
 
-App 的 `hkey` 参数由客户端 native 代码计算，纯脚本无法本地实现，所以脚本依赖一个第三方 hkey 服务代算签名（默认用社区公共的 `hkey.qcciii.com`，可被 `XHH_HKEY_API` 替换）。该服务只会收到 `heybox_id`、`imei`、接口路径和时间戳，**收不到 Cookie**，但注意：
+只有 App 通道需要它：App 的 `hkey` 由客户端 native 代码计算，纯脚本算不了，所以脚本把 `heybox_id`、`imei`、接口路径、时间戳发给第三方 hkey 服务（默认社区公共的 `hkey.qcciii.com`，可用 `XHH_HKEY_API` 替换）代算签名，**不发送 Cookie**。注意：
 
-- 公共服务的可用性没有保障，挂了脚本会报「hkey 服务请求失败」。
-- 对隐私敏感的话可以自己部署同协议的服务并换掉默认地址。
-- Web 端的签名算法虽然可以本地实现，但签到接口不认 Web 签名，所以签到只能走这条路。
+- 公共服务的可用性没有保障，挂了 App 通道会报「hkey 服务请求失败」，脚本会自动改走 Web 通道。
+- 对隐私敏感的话可以只用 Web 通道，完全不需要这个服务——这也是扫码登录的默认路线。
 
 ### Microsoft Rewards（国区，cn.bing.com）
 
@@ -134,4 +168,4 @@ BAIDUWP_COOKIE="..." python checkin_baiduwp.py
 
 ## 致谢
 
-接口参考 [Sitoi/dailycheckin](https://github.com/Sitoi/dailycheckin)（MIT）、[SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) 和 [yowiv08/heybox](https://github.com/yowiv08/heybox)。
+接口参考 [Sitoi/dailycheckin](https://github.com/Sitoi/dailycheckin)（MIT）、[SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) 和 [yowiv08/heybox](https://github.com/yowiv08/heybox)。小黑盒 Web 端签名算法来自 [foxlesbiao/xiaoheihe-mcp](https://github.com/foxlesbiao/xiaoheihe-mcp) 和公开的逆向分析。
