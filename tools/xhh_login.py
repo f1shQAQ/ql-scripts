@@ -157,9 +157,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="小黑盒手机号登录，生成 XHH_COOKIE")
     parser.add_argument("--phone", help="手机号")
     parser.add_argument("--code", help="验证码（不填则交互输入）")
-    parser.add_argument("--tokenid", default=DEFAULT_TOKEN_ID, help="x_xhh_tokenid（默认用占位值）")
+    parser.add_argument("--tokenid", default=os.getenv("XHH_TOKENID", DEFAULT_TOKEN_ID),
+                        help="x_xhh_tokenid（默认读环境变量 XHH_TOKENID，没有就用占位值）")
     parser.add_argument("--hkey-api", default=DEFAULT_HKEY_API, help="签名服务地址")
     parser.add_argument("--imei", help="指定 imei（默认按手机号固定生成）")
+    parser.add_argument("--debug", action="store_true", help="打印接口原始返回")
     args = parser.parse_args()
 
     phone = (args.phone or input("手机号：")).strip()
@@ -171,8 +173,19 @@ def main() -> int:
 
     print(f"\n发送验证码到 {phone[:3]}****{phone[-4:]} …")
     result = login.send_code(phone)
+    if args.debug:
+        print("返回：" + json.dumps(result, ensure_ascii=False)[:400])
     if result.get("status") != "ok":
-        print(f"发送失败：{result.get('msg') or result}")
+        message = str(result.get("msg") or result)
+        print(f"发送失败：{message}")
+        if "状态异常" in message:
+            print("""
+  服务端不放行发码，常见原因：
+    1. 这个号码不是该账号绑定的登录手机号（去 App「设置 → 账号与安全」确认）
+    2. 短时间发码次数太多被限流（等 10 分钟再试）
+    3. 设备指纹是占位值，被风控拦了（换浏览器里的真实 x_xhh_tokenid）：
+         python tools/xhh_login.py --phone %s --tokenid "B开头的那一长串"
+""" % phone)
         return 1
     print("已发送，等短信到达。")
 
@@ -182,6 +195,8 @@ def main() -> int:
         return 1
 
     result = login.login(phone, code)
+    if args.debug:
+        print("返回：" + json.dumps(result, ensure_ascii=False)[:600])
     if result.get("status") != "ok":
         print(f"\n登录失败：{result.get('msg') or json.dumps(result, ensure_ascii=False)[:200]}")
         return 1
