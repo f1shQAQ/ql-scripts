@@ -6,17 +6,17 @@ new Env('小黑盒签到')
 小黑盒每日签到：走 /task/sign_v3/sign，顺便汇报每日任务完成情况和 H 币余额。
 
 两条通道，脚本自动选：
-  Web 通道（默认，推荐）：本地算签名，不需要第三方服务，Cookie 只要 pkey。
-  App 通道：需要抓包拿到的 Cookie + 设备字段，签名得靠外部 hkey 服务（XHH_HKEY_API）。
+  App 通道：签到唯一可用的通道，Cookie 要带 x_xhh_tokenid + 设备字段，签名靠外部 hkey 服务。
+  Web 通道：本地算签名、不需要第三方服务，但只能读任务列表，签到会被拒（小黑盒签到只认 App 签名）。
 
 环境变量：
     XHH_COOKIE     两种写法都行：
-                    Web 登录态：pkey=xxx（tools/xhh_cookie.py 扫码生成的就是这种）
-                    App 抓包： pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=16;dw=411
+                    App 登录态：pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=16;dw=411
+                    Web 登录态：pkey=xxx（tools/xhh_cookie.py 扫码生成，只能读）
                     heybox_id 从 pkey 自动解析，不用填。多个账号用换行或 "&&" 分隔。
-    XHH_HKEY_API    只在 App 通道用：计算 App 签名（hkey/_rnd）的服务地址，默认
-                    https://hkey.qcciii.com/hkey。第三方服务，只会收到 heybox_id、imei、
-                    接口路径和时间戳，收不到 Cookie；服务挂了 App 通道就不可用。
+    XHH_HKEY_API    计算 App 签名（hkey/_rnd）的服务地址，默认 https://hkey.qcciii.com/hkey。
+                    第三方服务，只会收到 heybox_id、imei、接口路径和时间戳，收不到 Cookie；
+                    服务挂了 App 通道就不可用。
 
 接口参考 yowiv08/heybox（GitHub）的 heybox_sign.js；Web 签名算法来自公开的逆向分析。
 """
@@ -358,7 +358,10 @@ def sign_with_fallback(cookie: str, hkey_api: str, account: XiaoHeiHe) -> str:
     try:
         return account.sign()
     except SignError as error:
-        return f"失败（{error}）"
+        message = str(error)
+        if account.channel == "web" and "非法" in message:
+            return f"失败（{message}，网页登录态签不了；用 tools/xhh_login.py 换 App 登录态）"
+        return f"失败（{message}）"
 
 
 def open_account(cookie: str, hkey_api: str) -> tuple[XiaoHeiHe, dict]:
