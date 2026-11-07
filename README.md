@@ -71,8 +71,10 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 脚本有两条通道，会按 Cookie 形态自动选，一条失败自动换另一条：
 
-- **Web 通道（默认）**：签名在本地算，不依赖任何第三方服务，Cookie 只要 `pkey`。扫码登录拿到的就是这种。
+- **Web 通道（默认）**：签名在本地算，不依赖任何第三方服务，Cookie 只要 `pkey`。扫码登录拿到的就是这种。读任务列表、查 H 币都走这条。
 - **App 通道**：用抓包来的 Cookie + 设备字段，签名得找外部 hkey 服务。设备字段齐全且有 `x_xhh_tokenid` 时优先走这条。
+
+签到属于写操作，风控比读取严。Web 通道签到如果被拒（返回「非法的请求」），脚本会自动改用 App 通道补签一次，日志里会注明。两条都被拒时，通常是缺浏览器生成的 `x_xhh_tokenid`（数美设备指纹），见下面「补充 x_xhh_tokenid」。
 
 #### 获取 XHH_COOKIE
 
@@ -91,6 +93,20 @@ python tools/xhh_cookie.py
 4. 脚本自动生成设备指纹（`imei` 按账号固定生成，同一账号每次一致），并试读一次任务列表确认能登录，最后输出可直接填进青龙的 `XHH_COOKIE`。
 
 设备指纹默认用一套安卓值，只对 App 通道有用，Web 通道会忽略。`--device iphone` 可以换成 iPhone 的机型参数，或者用 `--device-info`、`--os-version`、`--dw`、`--imei` 单独覆盖。扫码登录对账号只做一次，之后 Cookie 一直有效，直到你改密码或主动退出。
+
+#### 补充 x_xhh_tokenid（签到时被风控挡了才需要）
+
+`x_xhh_tokenid` 是小黑盒网页里的设备指纹 Cookie（数美 SDK 生成），扫码接口不会下发。签到被两条通道都拒绝时，可以自己取一个：
+
+1. 电脑浏览器打开 https://xiaoheihe.cn ，登录（扫码即可）。
+2. F12 → Application（应用）→ Cookies → `https://xiaoheihe.cn`，找到 `x_xhh_tokenid`，复制整段值（很长，`B` 开头）。
+3. 生成 Cookie 时带上：
+
+```bash
+python tools/xhh_cookie.py --tokenid "粘贴到这里"
+```
+
+或者在青龙的 `XHH_COOKIE` 里直接追加一段 `;x_xhh_tokenid=值`。这个 Cookie 有效期约 14 天，过期后重新复制一次。
 
 扫码登录拿到的 Cookie 里没有 `x_xhh_tokenid`（这是浏览器里请求过接口才会有的字段），Web 通道用不上它，脚本会跳过。加 `--debug` 可以打印登录接口的原始返回，排查问题用。
 

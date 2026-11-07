@@ -168,6 +168,21 @@ def heybox_id_from_pkey(pkey: str) -> str:
     return match.group(1) if match else ""
 
 
+class SignError(RuntimeError):
+    """签到接口返回失败。"""
+
+
+def default_device(pkey: str) -> dict[str, str]:
+    """Cookie 里没带设备字段时按 pkey 生成一套固定值（同一账号每次一致）。"""
+    digest = hashlib.sha1(pkey.encode()).hexdigest()
+    return {
+        "imei": "86" + "".join(str(int(char, 16) % 10) for char in digest[:13]),
+        "device_info": "M2012K11AC",
+        "os_version": "13",
+        "dw": "411",
+    }
+
+
 class XiaoHeiHe:
     def __init__(self, cookie: str, hkey_api: str, channel: str = "auto"):
         fields = parse_cookie(cookie)
@@ -185,8 +200,9 @@ class XiaoHeiHe:
         # 其余（网页扫码拿到的）直接走 Web 通道，不需要设备字段，也不需要外部签名服务。
         if channel == "auto":
             channel = "app" if (token_id and all(device.values())) else "web"
-        if channel == "app" and not all(device.values()):
-            raise ValueError("App 通道需要 imei、device_info、os_version、dw 四个设备字段")
+        if channel == "app":
+            fallback = default_device(pkey)
+            device = {key: value or fallback[key] for key, value in device.items()}
 
         self.channel = channel
         self.hkey_api = hkey_api
@@ -315,17 +331,17 @@ class XiaoHeiHe:
         """签到，返回结果文本。"""
         r = self.get("/task/sign_v3/sign")
         if r.get("status") != "ok":
-            return f"失败（{r.get('msg') or r}）"
+            raise SignError(str(r.get("msg") or r))
         if str((r.get("result") or {}).get("state")) == "ignore":
             return "今天已签到"
 
         time.sleep(1)
         r = self.get("/task/sign_v3/get_sign_state")
         if r.get("status") != "ok":
-            return f"失败（{r.get('msg') or r}）"
+            raise SignError(str(r.get("msg") or r))
         state = str((r.get("result") or {}).get("state") or "")
         if state not in ("ok", "ignore"):
-            return f"失败（{r.get('msg') or state or '返回异常'}）"
+            raise SignError(str(r.get("msg") or state or "返回异常"))
         result = r.get("result") or {}
         parts = []
         if result.get("sign_in_coin"):
@@ -337,6 +353,23 @@ class XiaoHeiHe:
         return "成功，" + "，".join(parts) if parts else "成功"
 
 
+def sign_with_fallback(cookie: str, hkey_api: str, account: XiaoHeiHe) -> str:
+    """Web 通道签到被拒时，用 App 通道补一次。"""
+    try:
+        return account.sign()
+    except SignError as error:
+        if account.channel != "web":
+            return f"失败（{error}）"
+        try:
+            alt = XiaoHeiHe(cookie, hkey_api, channel="app")
+        except Exception as alt_error:  # noqa: BLE001
+            return f"失败（{error}；切 App 通道失败：{alt_error}）"
+        try:
+            return f"{alt.sign()}（Web 被拒，改用 App 通道）"
+        except SignError as alt_error:
+            return f"失败（{error}；App 通道：{alt_error}）"
+
+
 def open_account(cookie: str, hkey_api: str) -> tuple[XiaoHeiHe, dict]:
     """按 Cookie 形态挑通道，探测失败自动换另一条。"""
     fields = parse_cookie(cookie)
@@ -345,8 +378,6 @@ def open_account(cookie: str, hkey_api: str) -> tuple[XiaoHeiHe, dict]:
 
     problems: list[str] = []
     for channel in (["app", "web"] if prefer_app else ["web", "app"]):
-        if channel == "app" and not has_device:
-            continue
         try:
             account = XiaoHeiHe(cookie, hkey_api, channel=channel)
             snapshot = account.task_list()
@@ -358,12 +389,13 @@ def open_account(cookie: str, hkey_api: str) -> tuple[XiaoHeiHe, dict]:
 
 
 def handle(cookie: str, _index: int) -> str:
-    xhh, snapshot = open_account(cookie, env_str("XHH_HKEY_API", DEFAULT_HKEY_API))
+    hkey_api = env_str("XHH_HKEY_API", DEFAULT_HKEY_API)
+    xhh, snapshot = open_account(cookie, hkey_api)
 
     result: list[tuple[str, object]] = [
         ("账号", snapshot["username"] or f"ID {xhh.heybox_id}"),
         ("通道", "Web（本地签名）" if xhh.channel == "web" else "App（hkey 服务）"),
-        ("签到", xhh.sign()),
+        ("签到", sign_with_fallback(cookie, hkey_api, xhh)),
     ]
 
     # 签到完再看一眼任务和 H 币

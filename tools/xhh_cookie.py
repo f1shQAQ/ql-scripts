@@ -192,6 +192,7 @@ def device_fields(pkey: str, args: argparse.Namespace) -> dict[str, str]:
 
 
 def assemble(pkey: str, token_id: str, args: argparse.Namespace) -> str:
+    token_id = token_id or getattr(args, "tokenid", "") or ""
     if not pkey:
         raise ValueError("没找到登录凭据 pkey，确认复制的是 api.xiaoheihe.cn 请求的 Cookie（不是网页静态资源的）")
     parts = {"pkey": pkey}
@@ -272,6 +273,7 @@ def main() -> int:
     parser.add_argument("--dw", help="覆盖 dw")
     parser.add_argument("--channel", help="覆盖 channel（默认不带）")
     parser.add_argument("--qr-out", help="把二维码另存为 SVG，方便用浏览器打开")
+    parser.add_argument("--tokenid", help="手动指定 x_xhh_tokenid（浏览器 Cookie 里能复制到）")
     parser.add_argument("--debug", action="store_true", help="打印登录接口的原始返回，排查问题用")
     args = parser.parse_args()
 
