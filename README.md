@@ -5,7 +5,6 @@
 | 脚本 | 任务 | 默认定时 | 环境变量 |
 |---|---|---|---|
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
-| `checkin_quark.py` | 夸克网盘签到领容量 | 每天 08:25 | `QUARK_PARAM` |
 | `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
@@ -42,23 +41,6 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 | 变量 | 说明 |
 |---|---|
 | `BAIDUWP_COOKIE` | 浏览器登录 pan.baidu.com，按 F12 → 网络，复制任一请求的 `Cookie` 请求头。至少要有 `BDUSS` 和 `STOKEN`。也可以只填 `BDUSS` 的值。 |
-
-### 夸克网盘
-
-签到只能用移动端接口，网页 Cookie 签不了，需要手机抓包一次。
-
-| 变量 | 说明 |
-|---|---|
-| `QUARK_PARAM` | 抓包拿到的 drive-m.quark.cn 请求 URL，里面要有 `kps`、`sign`、`vcode`。也可以写成 `kps=...; sign=...; vcode=...`，前面可加 `user=备注;`。 |
-
-获取步骤：
-
-1. 手机装抓包工具（iOS 用 Stream 或 Reqable，Android 用 Reqable），按工具提示安装并信任证书。
-2. 打开抓包，再打开夸克 App →「我的」→「签到领空间」。
-3. 在抓包记录里找任意一个 `drive-m.quark.cn` 的请求，例如 `/1/clouddrive/capacity/growth/info`。
-4. 复制整段 URL，填进 `QUARK_PARAM`。
-
-参数的有效期没有官方说明。脚本报「参数可能已失效」时，重新抓一次。
 
 ### WorkBuddy
 
