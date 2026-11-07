@@ -7,6 +7,7 @@
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
 | `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
+| `checkin_xiaoheihe.py` | 小黑盒 App 签到，汇报每日任务和 H 币 | 每天 08:45 | `XHH_COOKIE` 等 |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
@@ -61,6 +62,33 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 | `BILI_SILVER2COIN` | `false` | `true` 时用银瓜子换硬币。 |
 | `BILI_VIP_PRIVILEGE` | `true` | 大会员时自动领取每月权益；`false` 关闭。 |
 
+### 小黑盒
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `XHH_COOKIE` | 无 | App 请求的 Cookie + 设备字段，见下面「获取 XHH_COOKIE」。多个账号用换行或 `&&` 分隔。 |
+| `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 计算 App 签名（hkey）的服务地址，见下面说明。 |
+
+#### 获取 XHH_COOKIE
+
+小黑盒的签到接口只认 App 请求的签名，需要抓包 App。用 Reqable / HttpCanary 等工具抓 `api.xiaoheihe.cn` 的请求（登录后进「我 → 我的任务」），从请求头 Cookie 里复制 `pkey` 和 `x_xhh_tokenid`，再从同一请求的查询参数里抄设备字段，拼成一行：
+
+```
+pkey=xxx;x_xhh_tokenid=xxx;imei=xxx;device_info=xxx;os_version=13;dw=411;channel=heybox_xiaomi
+```
+
+- `pkey`：身份凭据，`heybox_id` 会从中自动解析，不用单独填。
+- `x_xhh_tokenid`：身份凭据，缺了会请求失败。
+- `imei` / `device_info` / `os_version` / `dw` / `channel`：设备字段，从任意一个 App 请求的查询参数里照抄即可；`channel` 和 `dw` 可以省略，前四个不行。
+
+#### 关于 hkey 签名服务
+
+App 的 `hkey` 参数由客户端 native 代码计算，纯脚本无法本地实现，所以脚本依赖一个第三方 hkey 服务代算签名（默认用社区公共的 `hkey.qcciii.com`，可被 `XHH_HKEY_API` 替换）。该服务只会收到 `heybox_id`、`imei`、接口路径和时间戳，**收不到 Cookie**，但注意：
+
+- 公共服务的可用性没有保障，挂了脚本会报「hkey 服务请求失败」。
+- 对隐私敏感的话可以自己部署同协议的服务并换掉默认地址。
+- Web 端的签名算法虽然可以本地实现，但签到接口不认 Web 签名，所以签到只能走这条路。
+
 ### Microsoft Rewards（国区，cn.bing.com）
 
 > Microsoft Rewards 条款禁止自动化，有封号风险，没兑换的积分会作废。脚本不含防检测代码。
@@ -106,4 +134,4 @@ BAIDUWP_COOKIE="..." python checkin_baiduwp.py
 
 ## 致谢
 
-接口参考 [Sitoi/dailycheckin](https://github.com/Sitoi/dailycheckin)（MIT）和 [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)。
+接口参考 [Sitoi/dailycheckin](https://github.com/Sitoi/dailycheckin)（MIT）、[SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) 和 [yowiv08/heybox](https://github.com/yowiv08/heybox)。
