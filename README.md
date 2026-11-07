@@ -6,6 +6,7 @@
 |---|---|---|---|
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
 | `checkin_quark.py` | 夸克网盘签到领容量 | 每天 08:25 | `QUARK_PARAM` |
+| `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
 
@@ -58,6 +59,16 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 4. 复制整段 URL，填进 `QUARK_PARAM`。
 
 参数的有效期没有官方说明。脚本报「参数可能已失效」时，重新抓一次。
+
+### WorkBuddy
+
+| 变量 | 说明 |
+|---|---|
+| `WB_TOKEN` | 每个账号一行 `AT:RT`，前面可加 `备注:`。在本地运行 `python tools/wb_token.py`，用短信验证码登录后获取。 |
+
+- 脚本每次先用 RT 续期，新的 AT / RT 自动写回 `WB_TOKEN`（需要青龙 2.18+）。写回失败时，日志里会打印新值，请手动更新。
+- 用短信登录拿凭据，可能会让其他设备上的 WorkBuddy 退出登录。
+- 5.6.2 以后的客户端会加密本地登录文件，所以不要从客户端文件里复制 token，用 `tools/wb_token.py`。
 
 ### B站
 
