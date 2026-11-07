@@ -147,6 +147,36 @@ def notify(title: str, content: str) -> None:
         _script_notify(title, content)
 
 
+def replace_env_value(env_name: str, old: str, new: str) -> bool:
+    """把青龙环境变量 env_name 里的 old 片段换成 new（用于轮换 token）。需要青龙 2.18+。"""
+    if not old or old == new:
+        return True
+    api = getattr(builtins, "QLAPI", None)
+    if api is None or not hasattr(api, "getEnvs"):
+        print(f"没有 QLAPI，无法自动更新 {env_name}，请手动更新")
+        return False
+    try:
+        envs = (api.getEnvs({"searchValue": env_name}) or {}).get("data") or []
+        for env in envs:
+            value = env.get("value") or ""
+            if env.get("name") == env_name and old in value:
+                api.updateEnv(
+                    {
+                        "env": {
+                            "id": env.get("id"),
+                            "name": env_name,
+                            "value": value.replace(old, new),
+                            "remarks": env.get("remarks") or "",
+                        }
+                    }
+                )
+                return True
+        print(f"没有在 {env_name} 里找到旧值，无法自动更新")
+    except Exception as e:  # noqa: BLE001
+        print(f"更新环境变量 {env_name} 失败：{e}")
+    return False
+
+
 def run_accounts(
     title: str,
     env_name: str,

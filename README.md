@@ -6,6 +6,7 @@
 |---|---|---|---|
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
+| `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
 
@@ -48,6 +49,25 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 | `BILI_COIN_NUM` | `0` | 每天投币总数，0～5。默认不投币。 |
 | `BILI_SILVER2COIN` | `false` | `true` 时用银瓜子换硬币。 |
 | `BILI_VIP_PRIVILEGE` | `true` | 大会员时自动领取每月权益；`false` 关闭。 |
+
+### Microsoft Rewards（国区，cn.bing.com）
+
+> Microsoft Rewards 条款禁止自动化，有封号风险，没兑换的积分会作废。脚本不含防检测代码。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MSR_COOKIE` | 无 | 浏览器登录后打开 https://rewards.bing.com ，按 F12 → 网络，复制 rewards.bing.com 请求的 `Cookie`。必须有 `_U`。 |
+| `MSR_REFRESH_TOKEN` | 无 | 可选，用于 App 签到和阅读。在本地运行 `python tools/msr_token.py` 获取。多账号按 `MSR_COOKIE` 的顺序排。微软返回新 token 时，脚本自动写回这个变量（需要青龙 2.18+）。 |
+| `MSR_SEARCH` | `true` | `false` 时不做搜索。 |
+| `MSR_SEARCH_DELAY` | `15` | 两次搜索之间的秒数，最小 5。 |
+
+任务：
+
+| 任务 | 说明 |
+|---|---|
+| 电脑 / 手机搜索 | 在 cn.bing.com 搜百度、微博热搜词，按面板计数器搜到满分为止 |
+| 每日活动 | 点击类活动直接完成；测验类可能完成不了 |
+| App 签到、阅读赚积分 | 需要 `MSR_REFRESH_TOKEN` |
 
 ## 安全
 
