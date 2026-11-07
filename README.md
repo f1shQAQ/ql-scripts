@@ -67,7 +67,8 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `XHH_COOKIE` | 无 | 登录凭据 + 设备字段，见下面「获取 XHH_COOKIE」。多个账号用换行或 `&&` 分隔。 |
-| `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 计算 App 签名的服务地址，见下面说明。 |
+| `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 计算 App 签名和加密上报的服务地址，见下面说明。 |
+| `XHH_SHARE_TASKS` | `true` | `false` 时只签到，不做分享类任务。 |
 
 两条签名通道，脚本自动选：
 
@@ -75,6 +76,16 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 - **Web 通道**：签名在本地算，不需要第三方服务；读任务列表、查 H 币没问题，但**签到会被拒**（返回「非法的请求」）——小黑盒的签到只认 App 签名。
 
 所以关键结论：**要有 App 登录态才能签到**。网页扫码拿到的 pkey 只在 Web 通道有效，拿去 App 通道会提示「请重新登录」。
+
+签到之后，脚本会顺手做三个分享类任务（App 通道，`XHH_SHARE_TASKS=false` 可关闭）：
+
+| 任务 | 做法 |
+|---|---|
+| 分享任意帖子到社交平台 | 拉信息流 → 上报 5 秒浏览时长 → 上报「点击分享」「分享成功」两个事件 |
+| 分享游戏详情到社交平台 | 拉推荐游戏 → 上报分享事件 |
+| 分享游戏评价到社交平台 | 拉推荐游戏 → 拉该游戏评论 → 上报分享事件 |
+
+「参与主题创作活动」需要真的发帖子，脚本不做，日志里会留在「未完成」。上报走 `data.xiaoheihe.cn`，内容由 hkey 服务加密（`mode=report`）。
 
 #### 获取 XHH_COOKIE
 
