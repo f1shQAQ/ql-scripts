@@ -242,12 +242,53 @@ class Web:
         return f"{status} {progress}/{maximum}（本次搜索 {done} 次）"
 
     # ---- 每日活动 ----
-    def verification_token(self) -> str:
-        html = self.s.get(f"{REWARDS}/", headers={"Referer": f"{REWARDS}/"}, timeout=20).text
-        m = re.search(r'RequestVerificationToken.*?value="([^"]+)"', html) or re.search(
-            r'"verificationToken":\s*"([^"]+)"', html
-        )
-        return m.group(1) if m else ""
+    def report_action(self) -> tuple[str, str]:
+        """新版 rewards.bing.com（Next.js）用 server action 上报活动。
+
+        action ID 每次网站发版都会变，所以每次从 /earn 页面引用的 JS 里现找。
+        返回 (action ID, 部署号)，找不到时 action ID 为空。
+        """
+        page = self.s.get(f"{REWARDS}/earn", timeout=20).text
+        page += self.s.get(f"{REWARDS}/about", timeout=20).text  # 公共 JS 也在这里，/earn 没拿到时兜底
+        dpl = re.search(r"[?&](?:amp;)?dpl=([\w.-]+)", page) or re.search(r'data-dpl-id="([\w.-]+)"', page)
+        chunks = list(dict.fromkeys(re.findall(r"(/_next/static/chunks/[\w\-./()]+?\.js)", page)))
+        pattern = re.compile(r'createServerReference\)\("([a-f0-9]{40,64})"[^;]{0,300}?"reportActivity"\)')
+        for path in chunks[:80]:
+            try:
+                m = pattern.search(self.s.get(f"{REWARDS}{path}", timeout=20).text)
+            except Exception:  # noqa: BLE001
+                continue
+            if m:
+                return m.group(1), dpl.group(1) if dpl else ""
+        return "", dpl.group(1) if dpl else ""
+
+    def report_once(self, action_id: str, dpl: str, promo: dict) -> bool:
+        tree = ["", {"children": ["(nav)", {"children": ["earn", {"children": ["__PAGE__", {}, None, None, 0]},
+                                                         None, None, 0]}, None, None, 0]}, None, None, 16]
+        headers = {
+            "Accept": "text/x-component",
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Next-Action": action_id,
+            "Next-Router-State-Tree": quote(json.dumps(tree, separators=(",", ":")), safe=""),
+            "Origin": REWARDS,
+            "Referer": f"{REWARDS}/earn",
+        }
+        if dpl:
+            headers["X-Deployment-Id"] = dpl
+        try:
+            activity_type = int(promo.get("activityType") or 11)
+        except (TypeError, ValueError):
+            activity_type = 11
+        offset = str(int(-(datetime.now().astimezone().utcoffset().total_seconds()) // 60))
+        body = [
+            promo["hash"],
+            activity_type,
+            {"offerid": promo["offerId"], "isPromotional": True if promo.get("isPromotional") else "$undefined",
+             "timezoneOffset": offset},
+        ]
+        r = self.s.post(f"{REWARDS}/earn", data=json.dumps(body, ensure_ascii=False).encode(), headers=headers,
+                        timeout=20)
+        return r.status_code < 300 and bool(re.search(r"^\d+:true\s*$", r.text, re.M))
 
     @staticmethod
     def today_promotions(dash: dict) -> list[dict]:
@@ -272,17 +313,13 @@ class Web:
         ]
         if not todo:
             return "没有待完成的活动"
-        token = self.verification_token()
-        if not token:
-            return "没拿到 RequestVerificationToken，跳过"
+        action_id, dpl = self.report_action()
+        if not action_id:
+            return f"待完成 {len(todo)} 个，但没在网页 JS 里找到 reportActivity（网站可能又改版了），跳过"
+        print(f"reportActivity action：{action_id[:12]}…，部署号：{dpl or '未知'}")
         for p in todo:
-            self.s.post(
-                f"{REWARDS}/api/reportactivity",
-                params={"X-Requested-With": "XMLHttpRequest"},
-                data={"id": p["offerId"], "hash": p["hash"], "activityAmount": 1, "__RequestVerificationToken": token},
-                headers={"Referer": f"{REWARDS}/", "X-Requested-With": "XMLHttpRequest"},
-                timeout=20,
-            )
+            ok = self.report_once(action_id, dpl, p)
+            print(f"上报 {p['offerId']}：{'服务器已确认' if ok else '服务器没确认'}")
             time.sleep(3)
         after = {p.get("offerId"): p for p in self.today_promotions(self.userinfo())}
         done = sum(1 for p in todo if (after.get(p["offerId"]) or {}).get("complete"))
