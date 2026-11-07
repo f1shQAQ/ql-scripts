@@ -56,10 +56,22 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `MSR_COOKIE` | 无 | 浏览器登录后打开 https://rewards.bing.com ，按 F12 → 网络，复制 rewards.bing.com 请求的 `Cookie`。必须有 `_U`。 |
+| `MSR_COOKIE` | 无 | 用插件导出，见下面「获取 MSR_COOKIE」。多个账号用 `&&` 分隔。 |
 | `MSR_REFRESH_TOKEN` | 无 | 可选，用于 App 签到和阅读。在本地运行 `python tools/msr_token.py` 获取。多账号按 `MSR_COOKIE` 的顺序排。微软返回新 token 时，脚本自动写回这个变量（需要青龙 2.18+）。 |
 | `MSR_SEARCH` | `true` | `false` 时不做搜索。 |
 | `MSR_SEARCH_DELAY` | `15` | 两次搜索之间的秒数，最小 5。 |
+
+#### 获取 MSR_COOKIE
+
+rewards.bing.com 的会话 Cookie 很快过期，只复制请求头会一直报 `HTTP 401`。脚本需要 login.live.com 的登录态，过期后自动续登（和浏览器自动跳转一样）。
+
+1. 安装浏览器插件 [Cookie-Editor](https://cookie-editor.com/)。
+2. 登录微软账号，勾选「保持登录」。
+3. 打开 https://rewards.bing.com ，点 Cookie-Editor → Export → JSON。
+4. 打开 https://login.live.com/oauth20_desktop.srf （空白页是正常的），再导出一次 JSON。
+5. 把两段 JSON 前后拼在一起，整段填进 `MSR_COOKIE`。
+
+也支持 cookies.txt 格式（Get cookies.txt LOCALLY 等插件）和普通 `Cookie` 请求头。请求头没有 login.live.com 的部分，过期后不能自动续登。
 
 任务：
 

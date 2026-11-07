@@ -8,9 +8,11 @@ Microsoft Rewards 国区每日任务（cn.bing.com）：
     Bing App 每日签到、阅读赚积分。
 
 环境变量：
-    MSR_COOKIE          在已登录的浏览器打开 https://rewards.bing.com ，按 F12 → 网络，
-                        复制 rewards.bing.com 请求的 Cookie 请求头（必须有 _U）。
-                        多个账号用换行或 "&&" 分隔。
+    MSR_COOKIE          推荐用 Cookie-Editor 插件分别在 https://rewards.bing.com 和
+                        https://login.live.com/oauth20_desktop.srf 导出 JSON，两段直接拼在一起填入。
+                        有 login.live.com 的 Cookie 时，rewards 会话过期后脚本会自动续登。
+                        也支持 cookies.txt 和普通 Cookie 请求头（请求头很快会过期）。
+                        多个账号用 "&&" 分隔。
     MSR_REFRESH_TOKEN   可选。App 签到和阅读用的 refresh token，在本地运行 tools/msr_token.py 获取。
                         多个账号按 MSR_COOKIE 的顺序排列，用换行或 "&&" 分隔。
                         脚本会把微软返回的新 token 自动写回这个变量（需要青龙 2.18+）。
@@ -23,6 +25,7 @@ Microsoft Rewards 条款禁止自动化，账号有被封的风险。
 
 from __future__ import annotations
 
+import html
 import json
 import random
 import re
@@ -35,8 +38,10 @@ from qlutils import (
     env_bool,
     env_int,
     get_accounts,
+    get_cookie_accounts,
     lines,
     new_session,
+    parse_cookie_export,
     replace_env_value,
     run_accounts,
     safe_json,
@@ -105,21 +110,62 @@ def hot_words() -> list[str]:
 # ---------------------------------------------------------------- 网页端
 
 class Web:
-    def __init__(self, cookie: str):
-        self.cookie = cookie
-        self.s = new_session({"Cookie": cookie})
+    def __init__(self, cookie_text: str):
+        self.s = new_session()
+        self.cookies = parse_cookie_export(cookie_text, ".bing.com")
+        for c in self.cookies:
+            self.s.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"], secure=c["secure"])
+        self.has_live = any("live.com" in c["domain"] for c in self.cookies)
+        domains: dict[str, int] = {}
+        for c in self.cookies:
+            domains[c["domain"]] = domains.get(c["domain"], 0) + 1
+        print("读到的 Cookie：" + "，".join(f"{d} {n} 个" for d, n in domains.items()))
+        if not any(c["name"] == "_U" for c in self.cookies):
+            print("提示：没有 _U，Bing 搜索可能不计分")
 
-    def userinfo(self) -> dict:
-        resp = self.s.get(
+    def _get_userinfo(self):
+        return self.s.get(
             f"{REWARDS}/api/getuserinfo",
             params={"type": 1, "X-Requested-With": "XMLHttpRequest", "_": int(time.time() * 1000)},
             headers={"Referer": f"{REWARDS}/", "X-Requested-With": "XMLHttpRequest"},
             timeout=20,
         )
+
+    def sso(self) -> None:
+        """rewards.bing.com 的会话过期后，用 login.live.com 的登录态静默续登，和浏览器自动跳转的过程一样。"""
+        r = self.s.get(f"{REWARDS}/Signin", params={"idru": "/", "silent": "True"}, timeout=20)
+        for _ in range(4):
+            form = re.search(r"<form[^>]*\baction=\"([^\"]+)\"[^>]*>(.*?)</form>", r.text, re.S | re.I)
+            if not form:
+                return
+            fields: dict[str, str] = {}
+            for tag in re.findall(r"<input[^>]*>", form.group(2), re.I):
+                name = re.search(r'\bname="([^"]*)"', tag)
+                value = re.search(r'\bvalue="([^"]*)"', tag)
+                if name:
+                    fields[name.group(1)] = html.unescape(value.group(1)) if value else ""
+            if fields.get("error"):
+                raise ValueError(
+                    f"login.live.com 拒绝静默登录（{fields['error']}）。请在浏览器重新登录微软账号，"
+                    "勾选「保持登录」，再按 README 重新导出 Cookie"
+                )
+            r = self.s.post(html.unescape(form.group(1)), data=fields, timeout=20)
+
+    def userinfo(self) -> dict:
+        resp = self._get_userinfo()
+        if resp.status_code == 401:
+            if not self.has_live:
+                raise ValueError(
+                    "rewards.bing.com 的会话已过期（HTTP 401）。只复制请求头的 Cookie 撑不了多久，"
+                    "请按 README 用 Cookie-Editor 导出 rewards.bing.com 和 login.live.com 两份 JSON"
+                )
+            self.sso()
+            resp = self._get_userinfo()
         data = safe_json(resp)
         dash = data.get("dashboard") or data
         if not isinstance(dash, dict) or not dash.get("userStatus"):
-            raise ValueError(f"Cookie 无效或已过期（HTTP {resp.status_code}），请重新复制 rewards.bing.com 的 Cookie")
+            hint = "接口可能改版了" if resp.status_code in (200, 404) else "登录态无效"
+            raise ValueError(f"取不到积分面板（HTTP {resp.status_code}，{hint}）：{str(data)[:150]}")
         return dash
 
     @staticmethod
@@ -136,11 +182,8 @@ class Web:
     # ---- 搜索 ----
     def search_once(self, word: str, mobile: bool) -> bool:
         today = datetime.now().strftime("%Y-%m-%d")
-        device_cookie = f"_Rwho=u={'m' if mobile else 'd'}&ts={today}"
-        headers = {
-            "User-Agent": MOBILE_UA if mobile else PC_UA,
-            "Cookie": f"{self.cookie}; {device_cookie}",
-        }
+        self.s.cookies.set("_Rwho", f"u={'m' if mobile else 'd'}&ts={today}", domain=".bing.com", path="/")
+        headers = {"User-Agent": MOBILE_UA if mobile else PC_UA}
         cvid = uuid.uuid4().hex.upper()
         url = f"{BING}/search?q={quote(word)}&form=QBLH&cvid={cvid}"
         page = self.s.get(url, headers=headers, timeout=20)
@@ -374,4 +417,4 @@ def handle(cookie: str, index: int) -> str:
 
 
 if __name__ == "__main__":
-    run_accounts("Microsoft Rewards", "MSR_COOKIE", handle, gap_seconds=30)
+    run_accounts("Microsoft Rewards", "MSR_COOKIE", handle, gap_seconds=30, accounts=get_cookie_accounts("MSR_COOKIE"))

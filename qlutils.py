@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
 import re
 import sys
@@ -52,6 +53,94 @@ def parse_cookie(cookie: str) -> dict[str, str]:
         if key.strip():
             result[key.strip()] = value.strip()
     return result
+
+
+def _looks_like_export(text: str) -> bool:
+    t = text.lstrip()
+    return t.startswith("[") or t.startswith("{") or "\t" in text
+
+
+def get_cookie_accounts(env_name: str) -> list[str]:
+    """读取 Cookie 类账号，支持浏览器插件导出的多行 JSON / cookies.txt。
+
+    内容是插件导出格式时，多个账号只能用 "&&" 分隔（换行属于导出内容本身）；
+    普通 Cookie 请求头仍可用换行或 "&&" 分隔。
+    """
+    raw = os.getenv(env_name, "")
+    result: list[str] = []
+    for chunk in raw.split("&&"):
+        if _looks_like_export(chunk):
+            if chunk.strip():
+                result.append(chunk.strip())
+        else:
+            result += [p.strip() for p in chunk.split("\n") if p.strip()]
+    return result
+
+
+def parse_cookie_export(text: str, default_domain: str) -> list[dict[str, Any]]:
+    """把 Cookie 文本解析成 [{name, value, domain, path, secure}]。
+
+    支持三种格式：
+      1. Cookie-Editor / EditThisCookie 导出的 JSON（可以把几次导出直接拼在一起）
+      2. Netscape cookies.txt（Get cookies.txt LOCALLY 等插件）
+      3. 普通 "a=1; b=2" 请求头，域名统一记为 default_domain
+    """
+    text = text.strip()
+    if text.lower().startswith("cookie:"):
+        text = text[7:].strip()
+    cookies: list[dict[str, Any]] = []
+
+    if text.startswith("[") or text.startswith("{"):
+        decoder = json.JSONDecoder()
+        pos = 0
+        while pos < len(text):
+            while pos < len(text) and text[pos] in " \t\r\n,":
+                pos += 1
+            if pos >= len(text):
+                break
+            obj, pos = decoder.raw_decode(text, pos)
+            if isinstance(obj, dict):
+                obj = obj.get("cookies") or [obj]
+            for c in obj:
+                if not isinstance(c, dict) or not c.get("name"):
+                    continue
+                domain = c.get("domain") or default_domain
+                if c.get("hostOnly") is False and not domain.startswith("."):
+                    domain = "." + domain
+                cookies.append(
+                    {
+                        "name": c["name"],
+                        "value": str(c.get("value", "")),
+                        "domain": domain,
+                        "path": c.get("path") or "/",
+                        "secure": bool(c.get("secure")),
+                    }
+                )
+        return cookies
+
+    if "\t" in text:
+        for line in text.splitlines():
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            elif line.startswith("#") or not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            cookies.append(
+                {
+                    "name": parts[5],
+                    "value": parts[6].strip(),
+                    "domain": parts[0],
+                    "path": parts[2] or "/",
+                    "secure": parts[3].upper() == "TRUE",
+                }
+            )
+        return cookies
+
+    for name, value in parse_cookie(text).items():
+        cookies.append({"name": name, "value": value, "domain": default_domain, "path": "/", "secure": False})
+    return cookies
 
 
 def mask(text: str, keep: int = 3) -> str:
@@ -182,13 +271,15 @@ def run_accounts(
     env_name: str,
     handler: Callable[[str, int], str],
     gap_seconds: int = 3,
+    accounts: list[str] | None = None,
 ) -> None:
     """依次处理每个账号，把结果汇总成一条通知。
 
     handler(cookie, index) 返回这个账号的结果文本；抛异常时记为失败，不影响后面的账号。
     全部账号都失败时，进程以退出码 1 结束，方便在青龙日志里看出来。
     """
-    accounts = get_accounts(env_name)
+    if accounts is None:
+        accounts = get_accounts(env_name)
     if not accounts:
         print(f"没有设置环境变量 {env_name}，跳过。")
         return
