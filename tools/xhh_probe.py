@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 import time
 import uuid
@@ -62,7 +63,7 @@ def main() -> int:
     if token_id:
         base_cookies["x_xhh_tokenid"] = token_id
 
-    def call(path: str, profile: dict, cookies: dict, ua: str = WEB_UA, extra: dict | None = None) -> tuple[str, str]:
+    def call(path: str, profile: dict, cookies: dict, ua: str = WEB_UA, extra: dict | None = None) -> dict:
         query = {**profile, "heybox_id": heybox_id, **web_sign(path), **(extra or {})}
         query = {k: v for k, v in query.items() if v}
         headers = {
@@ -74,18 +75,44 @@ def main() -> int:
         r = requests.get(API + path, params=query, headers=headers, cookies=cookies, timeout=20)
         try:
             data = r.json()
-            return str(data.get("status")), str(data.get("msg") or data.get("result") or "")
         except ValueError:
-            return f"HTTP {r.status_code}", r.text[:80]
+            return {"status": f"HTTP {r.status_code}", "msg": r.text[:80]}
+        return data if isinstance(data, dict) else {"status": "bad_json", "msg": str(data)[:80]}
 
-    print("\n[0] 先确认登录态：/task/list_v2/")
-    status, msg = call("/task/list_v2/", dict(WEB_PROFILE), base_cookies)
-    print(f"    {status} / {msg[:120]}")
+    def brief(data: dict) -> str:
+        status = str(data.get("status"))
+        detail = data.get("msg") or data.get("result") or ""
+        if not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False)
+        return f"{status} / {detail[:90]}"
+
+    print("\n[0] 登录态：/task/list_v2/")
+    listing = call("/task/list_v2/", dict(WEB_PROFILE), base_cookies)
+    print(f"    {brief(listing)[:100]}")
     if args.only_read:
         return 0
-    if status != "ok":
+    if listing.get("status") != "ok":
         print("登录态都不通，先解决 Cookie 问题")
         return 1
+
+    # 把「签到」任务的原始字段打出来，看看接口有没有要求 task_id 之类
+    sign_task: dict = {}
+    for group in (listing.get("result") or {}).get("task_list") or []:
+        for item in group.get("tasks") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "sign" or "签到" in str(item.get("title") or ""):
+                sign_task = item
+                break
+        if sign_task:
+            break
+    if sign_task:
+        keep = {k: v for k, v in sign_task.items()
+                if k in ("id", "task_id", "type", "state", "title", "task_type", "jump_url", "report_extra")}
+        print("\n[1] 签到任务字段：")
+        print("    " + json.dumps(keep, ensure_ascii=False)[:600])
+        print(f"    全部键名：{sorted(sign_task.keys())}")
+    task_id = str(sign_task.get("id") or sign_task.get("task_id") or "")
 
     website_profile = {
         "os_type": "web", "app": "heybox",
@@ -99,23 +126,45 @@ def main() -> int:
     }
 
     variants: list[tuple[str, dict, dict, str, dict | None]] = [
-        ("A 基线（当前脚本用的）", dict(WEB_PROFILE), base_cookies, WEB_UA, None),
-        ("B 只带 pkey 一个 Cookie", dict(WEB_PROFILE), {"pkey": pkey}, WEB_UA, None),
-        ("C 基线 + device_id", {**WEB_PROFILE, "device_id": device_id}, base_cookies, WEB_UA, None),
-        ("D 官网参数组 heybox_website", website_profile, base_cookies, WEB_UA, None),
-        ("E 账号中心参数组 heybox_acc", account_profile, base_cookies, WEB_UA, None),
+        ("A 基线", dict(WEB_PROFILE), base_cookies, WEB_UA, None),
+        ("B 基线 + token 放 query", dict(WEB_PROFILE), base_cookies, WEB_UA,
+         {"token": token_id} if token_id else None),
+        ("C 基线 + x_xhh_tokenid 放 query", dict(WEB_PROFILE), base_cookies, WEB_UA,
+         {"x_xhh_tokenid": token_id} if token_id else None),
+        ("D 官网参数组", website_profile, base_cookies, WEB_UA, None),
+        ("E 账号中心参数组", account_profile, base_cookies, WEB_UA, None),
         ("F 手机 UA", dict(WEB_PROFILE), base_cookies, MOBILE_UA, None),
-        ("G 基线 + task_id=1", dict(WEB_PROFILE), base_cookies, WEB_UA, {"task_id": "1"}),
     ]
-    if not token_id:
-        variants.append(("H 不带 tokenid 对照（当前就是）", dict(WEB_PROFILE), base_cookies, WEB_UA, None))
+    if task_id:
+        variants.insert(1, (f"B 基线 + task_id={task_id}", dict(WEB_PROFILE), base_cookies, WEB_UA,
+                            {"task_id": task_id}))
+    variants.append(("G 不带 _rnd", dict(WEB_PROFILE), base_cookies, WEB_UA, {"_rnd": "_"}))
 
-    print("\n依次尝试 /task/sign_v3/sign：")
+    print("\n[2] 依次尝试 /task/sign_v3/sign：")
     for label, profile, cookies, ua, extra in variants:
-        status, msg = call("/task/sign_v3/sign", profile, cookies, ua, extra)
-        print(f"  {label:34} -> {status} / {msg[:90]}")
-        if status == "ok":
-            print("\n  >>> 这组参数能签到，记下来 <<<")
+        if extra and extra.get("_rnd") == "_":
+            # 显式去掉 _rnd：先构造 query，再剔除
+            query_extra = {}
+            query = {**profile, "heybox_id": heybox_id, **web_sign("/task/sign_v3/sign"), **query_extra}
+            query.pop("_rnd", None)
+            query = {k: v for k, v in query.items() if v}
+            r = requests.get(
+                API + "/task/sign_v3/sign",
+                params=query,
+                headers={"User-Agent": ua, "Accept": "application/json, text/plain, */*",
+                         "Referer": "https://xiaoheihe.cn/", "Origin": "https://xiaoheihe.cn"},
+                cookies=cookies, timeout=20,
+            )
+            try:
+                data = r.json()
+            except ValueError:
+                data = {"status": f"HTTP {r.status_code}", "msg": r.text[:80]}
+        else:
+            data = call("/task/sign_v3/sign", profile, cookies, ua, extra)
+        print(f"  {label:28} -> {brief(data)}")
+        if data.get("status") == "ok":
+            print("\n  >>> 这组参数能签到 <<<")
+            print("  返回：" + json.dumps(data.get("result"), ensure_ascii=False)[:300])
             break
         time.sleep(1)
 
