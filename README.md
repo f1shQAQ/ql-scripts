@@ -7,7 +7,7 @@
 | `checkin_baiduwp.py` | 百度网盘会员签到 + 每日答题 | 每天 08:15 | `BAIDUWP_COOKIE` |
 | `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
-| `checkin_xiaoheihe.py` | 小黑盒签到 + 分享类任务，汇报任务进度和 H 币 | 每天 08:45 | `XHH_COOKIE` |
+| `checkin_xiaoheihe.py` | 小黑盒签到 + 浏览/分享任务，汇报任务进度和 H 币 | 每天 08:45 | `XHH_COOKIE` |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
@@ -68,7 +68,7 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 |---|---|---|
 | `XHH_COOKIE` | 无 | App 登录态 + 设备字段。获取方法见 [小黑盒 Cookie 获取指南](docs/xiaoheihe-cookie.md)。多个账号用换行或 `&&` 分隔。 |
 | `XHH_HKEY_API` | `https://hkey.qcciii.com/hkey` | 计算 App 签名和加密上报的服务地址，见下面说明。 |
-| `XHH_SHARE_TASKS` | `true` | `false` 时只签到，不做分享类任务。 |
+| `XHH_AUTO_TASKS` | `true` | `false` 时只签到，不做浏览/分享任务（兼容旧名 `XHH_SHARE_TASKS`）。 |
 
 两条签名通道，脚本自动选：
 
@@ -77,10 +77,11 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 所以关键结论：**要有 App 登录态才能签到**。网页扫码拿到的 pkey 只在 Web 通道有效，拿去 App 通道会提示「请重新登录」。
 
-签到之后，脚本会顺手做三个分享类任务（App 通道，`XHH_SHARE_TASKS=false` 可关闭）：
+签到之后，脚本会顺手做能自动完成的每日任务（App 通道，`XHH_AUTO_TASKS=false` 可关闭）：
 
 | 任务 | 做法 |
 |---|---|
+| 前往首页浏览三篇帖子 | 拉信息流取 3 篇不同帖子，各上报 30 秒阅读时长 |
 | 分享任意帖子到社交平台 | 拉信息流 → 上报 5 秒浏览时长 → 上报「点击分享」「分享成功」两个事件 |
 | 分享游戏详情到社交平台 | 拉推荐游戏 → 上报分享事件 |
 | 分享游戏评价到社交平台 | 拉推荐游戏 → 拉该游戏评论 → 上报分享事件 |

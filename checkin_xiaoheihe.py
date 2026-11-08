@@ -18,10 +18,10 @@ new Env('小黑盒签到')
     XHH_HKEY_API     计算 App 签名（hkey/_rnd）和加密上报的服务地址，默认
                      https://hkey.qcciii.com/hkey。第三方服务，只会收到 heybox_id、imei、
                      接口路径、时间戳和上报内容，收不到 Cookie；服务挂了 App 通道就不可用。
-    XHH_SHARE_TASKS  默认 true。设为 false 只签到，不做分享任务。
+    XHH_AUTO_TASKS   默认 true。设为 false 只签到，不做浏览/分享任务（兼容旧名 XHH_SHARE_TASKS）。
 
-分享类任务（App 通道）：
-    分享任意帖子到社交平台 / 分享游戏详情 / 分享游戏评价 —— 模拟浏览后加密上报分享事件。
+自动任务（App 通道）：
+    前往首页浏览三篇帖子（每篇上报 30 秒）、分享任意帖子 / 游戏详情 / 游戏评价 —— 模拟浏览后加密上报。
     「参与主题创作活动」需要真的发内容，脚本不做。
 
 接口参考 yowiv08/heybox（GitHub）的 heybox_sign.js；Web 签名算法来自公开的逆向分析。
@@ -354,14 +354,38 @@ class XiaoHeiHe:
         if str((r.get("result") or {}).get("state")) == "ignore":
             return "今天已签到"
 
-        time.sleep(1)
-        r = self.get("/task/sign_v3/get_sign_state")
+    def sign(self) -> str:
+        """签到。状态接口有时滞后，用任务列表兜底判断是否真的完成。"""
+        r = self.get("/task/sign_v3/sign")
         if r.get("status") != "ok":
             raise SignError(str(r.get("msg") or r))
-        state = str((r.get("result") or {}).get("state") or "")
-        if state not in ("ok", "ignore"):
-            raise SignError(str(r.get("msg") or state or "返回异常"))
-        result = r.get("result") or {}
+        if str((r.get("result") or {}).get("state")) == "ignore":
+            return "今天已签到"
+
+        last = "状态未更新"
+        for _ in range(4):
+            time.sleep(1.5)
+            state_r = self.get("/task/sign_v3/get_sign_state")
+            result = state_r.get("result") or {}
+            state = str(result.get("state") or "")
+            if state == "ignore":
+                return "今天已签到"
+            if state == "ok":
+                return self._sign_summary(result)
+
+            # 状态接口还在 waiting 时，看任务列表里的签到任务是不是已经 finish
+            try:
+                snapshot = self.task_list()
+            except Exception:  # noqa: BLE001
+                snapshot = None
+            task = next((t for t in (snapshot or {}).get("tasks", []) if t["type"] == "sign"), None)
+            if task and task["state"] == "finish":
+                return "成功（已签到，奖励明细稍后到账）"
+            last = str(state_r.get("msg") or state or "返回异常")
+        raise SignError(f"状态一直停在 {last}")
+
+    @staticmethod
+    def _sign_summary(result: dict) -> str:
         parts = []
         if result.get("sign_in_coin"):
             parts.append(f"+{result['sign_in_coin']}H币")
@@ -423,27 +447,29 @@ class XiaoHeiHe:
             if action == "tap":
                 time.sleep(2)
 
-    def share_post(self) -> None:
-        """分享任意帖子：拉信息流 → 上报浏览时长 → 上报分享事件。"""
+    def feed_posts(self) -> list[dict]:
+        """拉首页信息流，返回去重后的 [{link_id, h_src}]。"""
         feed = self.get("/bbs/app/feeds", FEEDS_QUERY)
         if feed.get("status") != "ok":
             raise RuntimeError(f"拉取帖子流失败：{feed.get('msg') or feed.get('status')}")
-        post = None
+        posts: list[dict] = []
+        seen: set[str] = set()
         for item in (feed.get("result") or {}).get("links") or []:
             link_id = str(item.get("link_id") or "")
             h_src = str(item.get("h_src") or "")
-            if re.fullmatch(r"[1-9]\d*", link_id) and h_src:
-                post = {"link_id": link_id, "h_src": h_src}
-                break
-        if not post:
-            raise RuntimeError("信息流里没有可用帖子")
+            if not re.fullmatch(r"[1-9]\d*", link_id) or not h_src or link_id in seen:
+                continue
+            seen.add(link_id)
+            posts.append({"link_id": link_id, "h_src": h_src})
+        return posts
 
-        time.sleep(1)
+    def report_view(self, post: dict, seconds: int) -> None:
+        """上报一篇帖子的阅读时长。"""
         text = json.dumps({
             "duration": [{
                 "id": int(post["link_id"]),
-                "duration": 5,
-                "duration_ms": 5000,
+                "duration": seconds,
+                "duration_ms": seconds * 1000,
                 "type": "link",
                 "time": int(time.time()),
                 "h_src": post["h_src"],
@@ -454,6 +480,25 @@ class XiaoHeiHe:
         r = self.post_encrypted("/bbs/app/link/view/time", text)
         if r.get("status") != "ok":
             raise RuntimeError(f"浏览时长上报失败：{r.get('msg') or r.get('status')}")
+
+    def browse_posts(self, count: int = 3, seconds: int = 30) -> None:
+        """浏览三篇帖子，每篇上报 30 秒阅读时长。"""
+        posts = self.feed_posts()
+        if len(posts) < count:
+            raise RuntimeError(f"信息流只拿到 {len(posts)} 篇帖子，不够 {count} 篇")
+        for post in posts[:count]:
+            time.sleep(1)
+            self.report_view(post, seconds)
+            time.sleep(2)
+
+    def share_post(self) -> None:
+        """分享任意帖子：拉信息流 → 上报浏览时长 → 上报分享事件。"""
+        posts = self.feed_posts()
+        if not posts:
+            raise RuntimeError("信息流里没有可用帖子")
+        post = posts[0]
+        time.sleep(1)
+        self.report_view(post, 5)
         self.send_share_events("link", {"link_id": post["link_id"], "h_src": post["h_src"]})
 
     def recommend_game(self) -> dict:
@@ -507,22 +552,24 @@ def sign_with_fallback(cookie: str, hkey_api: str, account: XiaoHeiHe) -> str:
         return f"失败（{message}）"
 
 
-def share_kind(title: str) -> str:
-    """按任务标题判断是哪一种分享任务，认不出来就返回空。"""
-    if "分享" not in title:
-        return ""
-    if "帖子" in title:
-        return "post"
-    if "游戏详情" in title:
-        return "game_detail"
-    if "评价" in title:
-        return "game_comment"
+def task_kind(title: str) -> str:
+    """按任务标题判断是哪一种能自动做的任务，认不出来就返回空。"""
+    if "浏览" in title and "帖子" in title:
+        return "browse"
+    if "分享" in title:
+        if "帖子" in title:
+            return "post"
+        if "游戏详情" in title:
+            return "game_detail"
+        if "评价" in title:
+            return "game_comment"
     return ""
 
 
-def run_share_tasks(account: XiaoHeiHe, tasks: list[dict]) -> tuple[list[str], list[str]]:
-    """把未完成的分享任务逐个做掉，返回（成功标题, 失败说明）。"""
+def run_auto_tasks(account: XiaoHeiHe, tasks: list[dict]) -> tuple[list[str], list[str]]:
+    """把未完成的浏览/分享任务逐个做掉，返回（成功标题, 失败说明）。"""
     handlers = {
+        "browse": account.browse_posts,
         "post": account.share_post,
         "game_detail": account.share_game_detail,
         "game_comment": account.share_game_comment,
@@ -532,7 +579,7 @@ def run_share_tasks(account: XiaoHeiHe, tasks: list[dict]) -> tuple[list[str], l
     for task in tasks:
         if task["state"] == "finish":
             continue
-        kind = share_kind(task["title"])
+        kind = task_kind(task["title"])
         if not kind:
             continue
         try:
@@ -588,13 +635,14 @@ def handle(cookie: str, _index: int) -> str:
     time.sleep(1)
     after = xhh.task_list()
 
-    # 分享类任务只有 App 通道能做（要 report 模式的加密上报）
-    if xhh.channel == "app" and env_flag("XHH_SHARE_TASKS", True):
-        done, failed = run_share_tasks(xhh, after["tasks"])
+    # 浏览/分享任务只有 App 通道能做（要 report 模式的加密上报）
+    auto_enabled = env_flag("XHH_AUTO_TASKS", env_flag("XHH_SHARE_TASKS", True))
+    if xhh.channel == "app" and auto_enabled:
+        done, failed = run_auto_tasks(xhh, after["tasks"])
         if done or failed:
             summary = f"{len(done)}/{len(done) + len(failed)}"
             detail = "、".join(failed[:2]) + ("…" if len(failed) > 2 else "")
-            result.append(("分享任务", summary + (f"，失败：{detail}" if failed else "")))
+            result.append(("自动任务", summary + (f"，失败：{detail}" if failed else "")))
             if done:
                 after = xhh.task_list()
 
