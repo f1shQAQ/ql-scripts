@@ -188,12 +188,27 @@ def main() -> int:
     print(f"   {probe_earn(requests_session, profile)}")
     print()
 
-    print("4. 静默登录")
+    print("4. 自动补登录（脚本现在会自己做这一步）")
+    web = msr.Web(parts[0])
+    fixed = web.login_callback()
+    print(f"   OAuth 回调: {'成功' if fixed else '失败'}")
+    if fixed:
+        page = web.earn_page()
+        offers = web.earn_offers(page)
+        balance = web.page_balance()
+        print(f"   /earn: {len(page)} 字节，待完成活动 {len(offers)} 个，页面余额 {balance if balance is not None else '读不到'}")
+    print()
+
+    print("5. 静默登录（老的 login.live.com 通道）")
     print(f"   {probe_silent(requests_session, profile)}")
     print()
 
     print("结论")
     ok = [k for k, v in results.items() if v.startswith("正常")]
+    if fixed:
+        print("   自动补登录可用，脚本能自己拿到网页会话，每日活动不受影响。")
+        print("   旧的 JSON 接口已经不返数据了，搜索会按余额模式跑（MSR_SEARCH_BUDGET 控制次数）。")
+        return 0
     if ok:
         print(f"   登录态可用（{'、'.join(ok)}）。网页端报错就把完整日志贴出来。")
         if len(ok) < len(results):
@@ -202,12 +217,8 @@ def main() -> int:
         return 0
 
     if dead:
-        print(f"   没建立持久登录（{'/'.join(dead)} = Disabled），导出的只是临时会话。按顺序查：")
-        print("     a) 换普通窗口（无痕窗口的 Cookie 是会话级，微软不会下发持久票据）")
-        print("     b) 登录页勾「保持登录」，登录后确认 rewards.bing.com 能看到积分")
-        print("     c) 浏览器设置里放行 bing.com / live.com / microsoft.com 的 Cookie，")
-        print("        跟踪防护调回「均衡」，关掉广告拦截和 Cookie 管理类扩展再试一次")
-        print("     d) 换一个没装扩展的浏览器再登录一次，排除扩展/策略问题")
+        print(f"   {'/'.join(dead)} = Disabled：新版流程常见，浏览器靠 Edge/MSA 会话登录，不下发持久票据。")
+        print("   脚本会用 OAuth 回调自己补登录，看上面第 4 项是否成功即可。")
     elif missing:
         print(f"   导出不完整：缺 {'、'.join(missing)}。重新导出，三处域名都要有。")
     else:

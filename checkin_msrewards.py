@@ -21,6 +21,7 @@ Microsoft Rewards 国区每日任务（cn.bing.com）：
     MSR_READ_DELAY      两次阅读上报之间的间隔秒数，默认 3。
     MSR_APP_PROMOTIONS  "false" 时不做其他 App 活动，默认 true。
     MSR_STEALTH         "false" 时退回最简请求头，只用于排查问题，默认开启。
+    MSR_SEARCH_BUDGET   新版页面不给搜索计数时，按余额模式最多试几次，默认 10。
     MSR_IMPERSONATE     "off" 时即使装了 curl_cffi 也不伪装 TLS 指纹，默认 auto。
 
 接口参考 TheNetsky/Microsoft-Rewards-Script 和 Greasy Fork 脚本 560503。
@@ -330,6 +331,8 @@ class Web:
         self.s = new_browser_session(self.pc)
         self.last_url = ""
         self.sso_tried = False
+        self.login_tried = False
+        self.counters_missing = False
         for c in self.cookies:
             self.s.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"], secure=c["secure"])
         self.has_live = any("live.com" in c["domain"] for c in self.cookies)
@@ -340,15 +343,6 @@ class Web:
         print(f"浏览器伪装：{'关闭' if not STEALTH else '开启'}，设备 {self.pc.platform} / {self.mobile.platform}")
         if not any(c["name"] == "_U" for c in self.cookies):
             print("提示：没有 _U，Bing 搜索可能不计分")
-        missing = self.missing_cookies()
-        if missing:
-            print("提示：缺少登录 Cookie " + "、".join(missing) + "，网页端大概率会报登录失效")
-        dead = self.placeholder_cookies()
-        if dead:
-            print(
-                f"提示：{'/'.join(dead)} 是 Disabled 占位值 —— 这次登录没有建立持久登录。"
-                "常见原因：无痕窗口、没勾「保持登录」、浏览器关闭时清除 Cookie、或拦了第三方 Cookie"
-            )
 
     def missing_cookies(self) -> list[str]:
         """导出里应该有的登录态 Cookie，缺了就说明这份导出不全。"""
@@ -371,6 +365,95 @@ class Web:
             print(f"预热首页失败（不影响后续）：{type(e).__name__}: {e}")
         self.last_url = f"{BING}/"
         human_sleep(3)
+
+    def ensure_login(self) -> None:
+        """网页会话没建立时补一次登录：先补 OAuth 回调，再退回老的静默续登。"""
+        if self.login_tried:
+            raise self._login_expired("本次运行已经尝试过重新登录")
+        self.login_tried = True
+        print("网页会话不可用，尝试补做 OAuth 登录")
+        if self.login_callback():
+            print("网页登录已恢复")
+            return
+        if not self.has_live:
+            raise self._login_expired("补登录失败，且 Cookie 里没有 login.live.com 的部分")
+        print("OAuth 补登录失败，改试老的静默续登")
+        self.sso()
+
+    def login_callback(self) -> bool:
+        """补做新版奖励站的登录回调。
+
+        /earn 会 302 到 login.windows.net；MSA 认可 Cookie 后返回一个自动提交表单，
+        把 code POST 回 rewards.bing.com/auth/callback。requests 不执行那段 JS，只能自己提交。
+        """
+        try:
+            r = self.s.get(
+                f"{REWARDS}/earn",
+                headers=nav_headers(self.pc, self.last_url or f"{BING}/", "same-site"),
+                timeout=20,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"打开 /earn 失败：{type(e).__name__}: {e}")
+            return False
+        for _ in range(3):
+            form = re.search(r"<form[^>]*\baction=\"([^\"]+)\"[^>]*>(.*?)</form>", r.text, re.S | re.I)
+            if not form:
+                break
+            action = html.unescape(form.group(1))
+            fields: dict[str, str] = {}
+            for tag in re.findall(r"<input[^>]*>", form.group(2), re.I):
+                name = re.search(r'\bname="([^"]*)"', tag)
+                value = re.search(r'\bvalue="([^"]*)"', tag)
+                if name:
+                    fields[name.group(1)] = html.unescape(value.group(1)) if value else ""
+            if "code" not in fields or "rewards.bing.com" not in action:
+                return False
+            r = self.s.post(
+                action,
+                data=fields,
+                headers={
+                    "Referer": str(r.url),
+                    "Origin": "https://login.live.com",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=20,
+            )
+        check = self.s.get(
+            f"{REWARDS}/earn",
+            headers=nav_headers(self.pc, f"{BING}/", "same-site"),
+            timeout=20,
+            allow_redirects=False,
+        )
+        return check.status_code == 200
+
+    def page_reachable(self) -> bool:
+        """/earn 能不能直接打开（200 且没被踢回登录页）。"""
+        try:
+            r = self.s.get(
+                f"{REWARDS}/earn",
+                headers=nav_headers(self.pc, self.last_url or f"{BING}/", "same-site"),
+                timeout=20,
+                allow_redirects=False,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        return r.status_code == 200
+
+    def page_balance(self) -> int | None:
+        """从 /earn 页面 RSC 里读余额（`{"balance":2200,"level":1}`），拿不到返回 None。"""
+        try:
+            r = self.s.get(
+                f"{REWARDS}/earn",
+                headers=nav_headers(self.pc, self.last_url or f"{BING}/", "same-site"),
+                timeout=20,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        for pattern in (r'"balance"\s*:\s*(\d+)', r'availablePoints"\s*:\s*(\d+)'):
+            m = re.search(pattern, r.text)
+            if m:
+                return int(m.group(1))
+        return None
 
     def _get_userinfo(self):
         return self.s.get(
@@ -423,18 +506,20 @@ class Web:
     def userinfo(self) -> dict:
         resp = self._get_userinfo()
         if resp.status_code == 401:
-            if not self.has_live:
-                raise self._login_expired(
-                    "rewards.bing.com 返回 HTTP 401，且 Cookie 里没有 login.live.com 的部分（无法续登）"
-                )
-            self.sso()
+            self.ensure_login()
             resp = self._get_userinfo()
         data = safe_json(resp)
         dash = data.get("dashboard") or data
-        if not isinstance(dash, dict) or not dash.get("userStatus"):
-            hint = "接口可能改版了" if resp.status_code in (200, 404) else "登录态无效"
-            raise ValueError(f"取不到积分面板（HTTP {resp.status_code}，{hint}）：{str(data)[:150]}")
-        return dash
+        if isinstance(dash, dict) and dash.get("userStatus"):
+            self.counters_missing = False
+            return dash
+        # 新版的 JSON 接口已经不返回数据了，页面能打开就改用页面数据
+        if not self.page_reachable():
+            raise self._login_expired(f"取不到积分面板（HTTP {resp.status_code}）")
+        self.counters_missing = True
+        balance = self.page_balance()
+        print("提示：旧接口不返回计数了，改用页面数据，搜索按余额模式跑")
+        return {"userStatus": {"availablePoints": balance or 0}}
 
     @staticmethod
     def points(dash: dict) -> int:
@@ -508,6 +593,8 @@ class Web:
         dash = self.userinfo()
         progress, maximum = self.counter(dash, name)
         if maximum == 0:
+            if self.counters_missing:
+                return self.search_by_balance(mobile, words, delay)
             return "没有这项任务（等级不够或地区不支持）"
         if progress >= maximum:
             return f"已完成 {progress}/{maximum}"
@@ -574,6 +661,50 @@ class Web:
         if stop_reason and progress < maximum:
             detail += f"，{stop_reason}"
         return f"{status} {progress}/{maximum}（{detail}）"
+
+    def search_by_balance(self, mobile: bool, words: list[str], delay: int) -> str:
+        """新版页面不再暴露搜索计数，就用上报结果和余额判断有没有加分。"""
+        before = self.page_balance()
+        if before is None:
+            print("页面也没给余额，按固定次数跑，只认上报确认的加分")
+        random.shuffle(words)
+        budget = max(env_int("MSR_SEARCH_BUDGET", 10), 4)
+        attempts = 0
+        accepted = 0
+        credited = 0
+        misses = 0
+        stop_reason = ""
+        while words and attempts < budget:
+            word = words.pop()
+            attempts += 1
+            try:
+                ok, gained = self.search_once(word, mobile)
+            except Blocked as e:
+                stop_reason = f"触发风控（{e}），停止后续搜索"
+                break
+            except Exception as e:  # noqa: BLE001
+                ok, gained = False, None
+                print(f"搜索请求异常（{word}）：{type(e).__name__}: {e}")
+            if ok:
+                accepted += 1
+            if gained and gained > 0:
+                credited += gained
+                misses = 0
+            else:
+                misses += 1
+            if misses >= 4:
+                stop_reason = "连续 4 次没加分，估计今天已经满额"
+                break
+            human_sleep(delay)
+            idle_pause()
+        after = self.page_balance()
+        total = after - before if before is not None and after is not None else credited
+        detail = f"尝试 {attempts} 次，成功上报 {accepted} 次"
+        if stop_reason:
+            detail += f"，{stop_reason}"
+        if total and total > 0:
+            return f"完成，余额 +{total}（{detail}）"
+        return f"未确认（{detail}）"
 
     # ---- 每日活动 ----
     def earn_page(self, retry: bool = True) -> str:

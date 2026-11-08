@@ -118,6 +118,7 @@ App 的 `hkey` 由客户端 native 代码计算，纯脚本算不了，所以脚
 | `MSR_READ_DELAY` | `3` | 两次阅读上报之间的秒数，最小 1。调大更接近真实阅读。 |
 | `MSR_APP_PROMOTIONS` | `true` | `false` 时跳过签到、阅读以外的其他 App 活动。 |
 | `MSR_STEALTH` | `true` | `false` 时关掉设备档案、请求头补全和节奏抖动，只发最简请求，用于排查「加了请求头反而报错」。 |
+| `MSR_SEARCH_BUDGET` | `10` | 新版页面不返回搜索计数时，按余额模式最多试几次搜索。 |
 | `MSR_IMPERSONATE` | `auto` | `off` 时即使装了 `curl_cffi` 也不做 TLS 指纹伪装。 |
 
 #### 获取 MSR_COOKIE
@@ -134,6 +135,8 @@ rewards.bing.com 的会话 Cookie 很快过期，只复制请求头会一直报 
 
 搜索和每日活动的登录态不是一回事：搜索走上报接口，`/earn` 页面要的是**网页会话**。日志里出现「网页会话已失效（/earn 被跳到登录页）」时，说明 rewards.bing.com 那份 Cookie 过期了 —— 脚本会先试一次静默续登，续不上就跳过每日活动并说明原因，不会拿失效会话继续发上报。按上面的步骤重新导出一份即可。
 
+新版 rewards.bing.com 换了登录方式：`/earn` 会 302 到微软登录页，最后由一个**自动提交表单**把 `code` POST 回 `rewards.bing.com/auth/callback`。浏览器会执行那段 JS，脚本不会，所以现在脚本自己补这一步（`login_callback`），补完 `/earn` 就是 200。旧的 `api/getuserinfo` 已经不再返回 JSON，余额改从页面读，搜索在没有计数时按余额模式跑。
+
 **登录不上时先自检**，不用整条任务跑一遍：
 
 ```bash
@@ -145,7 +148,7 @@ python tools/msr_probe.py cookies.json     # 也可以 MSR_COOKIE='...' python t
 | 现象 | 含义 |
 |---|---|
 | `getuserinfo` 401 + 静默登录 `login_required` | 这组 Cookie 已经换不到登录态，必须重新登录后导出；**先别再跑脚本**，反复失败只会让风控更紧 |
-| `MSPAuth` / `MSPProf` 的值是 `Disabled` | 这次登录没有建立持久登录（无痕窗口、没勾「保持登录」、浏览器清了 Cookie 或被拦），不是导出漏字段 |
+| `MSPAuth` / `MSPProf` 的值是 `Disabled` | 新版流程常见现象：浏览器靠 Edge/MSA 的会话登录，不下发持久票据。**不影响脚本**，脚本会用 OAuth 回调自己补登录 |
 | 关键 Cookie 缺 `RPSSecAuth` / `MSPAuth` / `_C_Auth` | 导出不全，多半只导了某一个域名 |
 | requests 正常、curl_cffi 401 | 传输层差异，先 `MSR_IMPERSONATE=off` 跑一次对比 |
 | 全部正常但脚本仍报错 | 把完整日志贴出来，多半是接口改版 |
