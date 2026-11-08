@@ -154,7 +154,13 @@ def main() -> int:
     missing = [n for n in ("_U", "RPSSecAuth", "MSPAuth", "_C_Auth") if n not in values]
     dead = [n for n in ("MSPAuth", "MSPProf") if values.get(n, "").strip().lower() == "disabled"]
     if dead:
-        print(f"   {'/'.join(dead)} 是 Disabled 占位值：浏览器那边已经登出，不是导出漏了字段")
+        print(f"   {'/'.join(dead)} = Disabled：这次登录没有建立持久登录，不是导出漏了字段")
+    grouped: dict[str, list[str]] = {}
+    for c in cookies:
+        grouped.setdefault(c["domain"], []).append(c["name"])
+    print("   全部 Cookie 名：")
+    for domain, names in grouped.items():
+        print(f"     {domain}: {', '.join(sorted(names))}")
     print()
 
     profile, _ = msr.device_set(values.get("MUID", ""))
@@ -188,21 +194,26 @@ def main() -> int:
 
     print("结论")
     ok = [k for k, v in results.items() if v.startswith("正常")]
-    if dead:
-        print(f"   浏览器侧已经登出（{'/'.join(dead)} 只是占位值），先在浏览器重新登录再导出。")
-    if missing:
-        print(f"   导出不完整：缺 {'、'.join(missing)}。重新导出，三处域名都要有。")
     if ok:
         print(f"   登录态可用（{'、'.join(ok)}）。网页端报错就把完整日志贴出来。")
         if len(ok) < len(results):
             bad = [k for k in results if k not in ok]
             print(f"   但 {'、'.join(bad)} 拿不到面板，可以设置 MSR_IMPERSONATE=off 再跑脚本。")
+        return 0
+
+    if dead:
+        print(f"   没建立持久登录（{'/'.join(dead)} = Disabled），导出的只是临时会话。按顺序查：")
+        print("     a) 换普通窗口（无痕窗口的 Cookie 是会话级，微软不会下发持久票据）")
+        print("     b) 登录页勾「保持登录」，登录后确认 rewards.bing.com 能看到积分")
+        print("     c) 浏览器设置里放行 bing.com / live.com / microsoft.com 的 Cookie，")
+        print("        跟踪防护调回「均衡」，关掉广告拦截和 Cookie 管理类扩展再试一次")
+        print("     d) 换一个没装扩展的浏览器再登录一次，排除扩展/策略问题")
+    elif missing:
+        print(f"   导出不完整：缺 {'、'.join(missing)}。重新导出，三处域名都要有。")
     else:
-        print("   这组 Cookie 已经换不到登录态了，需要重新登录后导出：")
-        print("   1) 浏览器退出登录，重新登录 rewards.bing.com，勾选「保持登录」")
-        print("   2) 用 Cookie-Editor 分别在 rewards.bing.com 和 login.live.com 导出，两段拼起来")
-        print("   3) 别让浏览器和脚本长期共用同一份登录态：跑脚本前先关掉 rewards 页面")
-    return 0 if ok else 1
+        print("   字段看着齐，但接口仍 401：可能是会话已经被吊销，重新登录后再导出一次。")
+    print("   如果浏览器里能正常用 Rewards，导出后仍是这个结果，把本页输出发我。")
+    return 1
 
 
 if __name__ == "__main__":

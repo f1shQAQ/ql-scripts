@@ -345,7 +345,10 @@ class Web:
             print("提示：缺少登录 Cookie " + "、".join(missing) + "，网页端大概率会报登录失效")
         dead = self.placeholder_cookies()
         if dead:
-            print(f"提示：{'/'.join(dead)} 的值是 Disabled 占位值，浏览器那边已经登出，重新登录后再导出")
+            print(
+                f"提示：{'/'.join(dead)} 是 Disabled 占位值 —— 这次登录没有建立持久登录。"
+                "常见原因：无痕窗口、没勾「保持登录」、浏览器关闭时清除 Cookie、或拦了第三方 Cookie"
+            )
 
     def missing_cookies(self) -> list[str]:
         """导出里应该有的登录态 Cookie，缺了就说明这份导出不全。"""
@@ -382,7 +385,7 @@ class Web:
         dead = self.placeholder_cookies()
         hint = f"；这份导出还缺 {'、'.join(miss)}" if miss else ""
         if dead:
-            hint += f"；{'/'.join(dead)} 只是 Disabled 占位值，说明浏览器已经登出"
+            hint += f"；{'/'.join(dead)} 是 Disabled，说明这次登录没有持久票据"
         return ValueError(
             f"{detail}{hint}。这组 Cookie 已经不能换到登录态了，"
             "通常是对应的登录态已过期、账号在别处被登出，或微软要求重新验证。"
