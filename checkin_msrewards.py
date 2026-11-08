@@ -44,7 +44,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from qlutils import (
     env_bool,
@@ -103,6 +103,14 @@ HTML_ACCEPT = (
     "image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
 )
 BLOCK_HINTS = ("captcha", "unusual traffic", "verify you are human", "too many requests")
+# rewards 把未登录的请求丢给这些入口，域名和路径都换过几次，一起认。
+LOGIN_HOSTS = (
+    "login.live.com",
+    "login.microsoftonline.com",
+    "login.windows.net",
+    "login.microsoft.com",
+    "account.microsoft.com",
+)
 
 
 class Blocked(RuntimeError):
@@ -265,6 +273,14 @@ def idle_pause() -> None:
         time.sleep(random.uniform(25, 80))
 
 
+def login_redirect(url: str) -> bool:
+    """这个地址是不是被踢回了登录页。"""
+    low = url.lower()
+    if any(h in low for h in LOGIN_HOSTS):
+        return True
+    return "/oauth20" in low or "oauth2/v2.0/authorize" in low
+
+
 def block_reason(status: int, text: str) -> str:
     """命中限流或验证码时返回一句话说明，没命中返回空串。"""
     if status in (403, 418, 429):
@@ -313,6 +329,7 @@ class Web:
         self.pc, self.mobile = device_set(seed)
         self.s = new_browser_session(self.pc)
         self.last_url = ""
+        self.sso_tried = False
         for c in self.cookies:
             self.s.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"], secure=c["secure"])
         self.has_live = any("live.com" in c["domain"] for c in self.cookies)
@@ -323,6 +340,14 @@ class Web:
         print(f"浏览器伪装：{'关闭' if not STEALTH else '开启'}，设备 {self.pc.platform} / {self.mobile.platform}")
         if not any(c["name"] == "_U" for c in self.cookies):
             print("提示：没有 _U，Bing 搜索可能不计分")
+        missing = self.missing_cookies()
+        if missing:
+            print("提示：缺少登录 Cookie " + "、".join(missing) + "，网页端大概率会报登录失效")
+
+    def missing_cookies(self) -> list[str]:
+        """导出里应该有的登录态 Cookie，缺了就说明这份导出不全。"""
+        names = {c["name"] for c in self.cookies}
+        return [n for n in ("_U", "RPSSecAuth", "MSPAuth", "_C_Auth") if n not in names]
 
     def warm_up(self) -> None:
         """先开一次首页，让 Bing 自己下发 MUID、SRCHHPGUSR 等 Cookie，再开始搜索。"""
@@ -341,8 +366,21 @@ class Web:
             timeout=20,
         )
 
+    def _login_expired(self, detail: str) -> ValueError:
+        miss = self.missing_cookies()
+        hint = f"；这份导出还缺 {'、'.join(miss)}" if miss else ""
+        return ValueError(
+            f"{detail}{hint}。这组 Cookie 已经不能换到登录态了，"
+            "通常是对应的登录态已过期、账号在别处被登出，或微软要求重新验证。"
+            "请在浏览器（建议无痕窗口）重新登录 rewards.bing.com，按 README 重新导出 Cookie 再跑；"
+            "连续失败时先别再跑，反复尝试只会让风控更紧"
+        )
+
     def sso(self) -> None:
         """rewards.bing.com 的会话过期后，用 login.live.com 的登录态静默续登，和浏览器自动跳转的过程一样。"""
+        if self.sso_tried:  # 一次运行只试一次，别把 login.live.com 当重试通道
+            raise self._login_expired("静默续登已经失败过")
+        self.sso_tried = True
         r = self.s.get(
             f"{REWARDS}/Signin",
             params={"idru": "/", "silent": "True"},
@@ -352,7 +390,7 @@ class Web:
         for _ in range(4):
             form = re.search(r"<form[^>]*\baction=\"([^\"]+)\"[^>]*>(.*?)</form>", r.text, re.S | re.I)
             if not form:
-                return
+                break
             fields: dict[str, str] = {}
             for tag in re.findall(r"<input[^>]*>", form.group(2), re.I):
                 name = re.search(r'\bname="([^"]*)"', tag)
@@ -360,19 +398,17 @@ class Web:
                 if name:
                     fields[name.group(1)] = html.unescape(value.group(1)) if value else ""
             if fields.get("error"):
-                raise ValueError(
-                    f"login.live.com 拒绝静默登录（{fields['error']}）。请在浏览器重新登录微软账号，"
-                    "勾选「保持登录」，再按 README 重新导出 Cookie"
-                )
+                raise self._login_expired(f"login.live.com 拒绝静默登录（{fields['error']}）")
             r = self.s.post(html.unescape(form.group(1)), data=fields, timeout=20)
+        if "rewards.bing.com" not in str(r.url):
+            raise self._login_expired(f"静默登录后停在 {urlparse(str(r.url)).netloc or '未知页面'}，没有回到 rewards")
 
     def userinfo(self) -> dict:
         resp = self._get_userinfo()
         if resp.status_code == 401:
             if not self.has_live:
-                raise ValueError(
-                    "rewards.bing.com 的会话已过期（HTTP 401）。只复制请求头的 Cookie 撑不了多久，"
-                    "请按 README 用 Cookie-Editor 导出 rewards.bing.com 和 login.live.com 两份 JSON"
+                raise self._login_expired(
+                    "rewards.bing.com 返回 HTTP 401，且 Cookie 里没有 login.live.com 的部分（无法续登）"
                 )
             self.sso()
             resp = self._get_userinfo()
@@ -531,15 +567,15 @@ class Web:
             timeout=20,
         )
         url = str(r.url)
-        if "login.live.com" in url or "oauth20" in url:
-            if retry and self.has_live:
-                print("rewards 网页会话过期，用 login.live.com 的登录态静默续登")
+        if login_redirect(url) or "rewards.bing.com" not in url:
+            if retry and self.has_live and not self.sso_tried:
+                print("rewards 网页会话过期，试一次静默续登")
                 self.sso()
                 return self.earn_page(retry=False)
-            raise ValueError(
-                "rewards.bing.com 网页会话已失效（/earn 被跳到登录页）。"
-                "搜索走的是接口还能用，但每日活动必须在登录状态下上报，"
-                "请按 README 重新导出 rewards.bing.com 和 login.live.com 的 Cookie"
+            where = urlparse(url).netloc or url[:50]
+            raise self._login_expired(
+                f"rewards.bing.com 网页会话已失效（/earn 被跳到 {where}）。"
+                "搜索走的是接口还能用，但每日活动必须在登录状态下上报"
             )
         if "/earn" not in url:
             print(f"打开 /earn 被跳转到 {url[:80]}")
@@ -1013,7 +1049,6 @@ def handle(cookie: str, index: int) -> str:
         time.sleep(random.uniform(2, 25))
     try:
         web = Web(cookie)
-        web.warm_up()
         dash = web.userinfo()
         start = web.points(dash)
         level = ((dash.get("userStatus") or {}).get("levelInfo") or {}).get("activeLevel", "?")
@@ -1024,6 +1059,7 @@ def handle(cookie: str, index: int) -> str:
 
     if web is not None and start is not None:
         if env_bool("MSR_SEARCH", True):
+            web.warm_up()  # 登录态确认可用之后再预热首页，别拿已经失效的会话去开页面
             words = hot_words(web.pc.ua)
             delay = max(env_int("MSR_SEARCH_DELAY", 15), 5)
             # 真人不一定先电脑后手机，每次随机；两类搜索各用完整词表，不互相继承 pop 后的剩余。

@@ -134,6 +134,23 @@ rewards.bing.com 的会话 Cookie 很快过期，只复制请求头会一直报 
 
 搜索和每日活动的登录态不是一回事：搜索走上报接口，`/earn` 页面要的是**网页会话**。日志里出现「网页会话已失效（/earn 被跳到登录页）」时，说明 rewards.bing.com 那份 Cookie 过期了 —— 脚本会先试一次静默续登，续不上就跳过每日活动并说明原因，不会拿失效会话继续发上报。按上面的步骤重新导出一份即可。
 
+**登录不上时先自检**，不用整条任务跑一遍：
+
+```bash
+python tools/msr_probe.py cookies.json     # 也可以 MSR_COOKIE='...' python tools/msr_probe.py
+```
+
+它会打出四块内容：关键 Cookie（`_U`、`RPSSecAuth`、`MSPAuth`、`_C_Auth` 等）是否齐全、`getuserinfo` 在 requests 和 curl_cffi 下分别返回什么、`/earn` 有没有被 302 到登录页、静默续登能不能走通，最后给一句结论。常见结果：
+
+| 现象 | 含义 |
+|---|---|
+| `getuserinfo` 401 + 静默登录 `login_required` | 这组 Cookie 已经换不到登录态，必须重新登录后导出；**先别再跑脚本**，反复失败只会让风控更紧 |
+| 关键 Cookie 缺 `RPSSecAuth` / `MSPAuth` / `_C_Auth` | 导出不全，多半只导了某一个域名 |
+| requests 正常、curl_cffi 401 | 传输层差异，先 `MSR_IMPERSONATE=off` 跑一次对比 |
+| 全部正常但脚本仍报错 | 把完整日志贴出来，多半是接口改版 |
+
+另外，**浏览器的登录态和脚本不要长期共用**。微软会轮换 `RPSSecAuth` 这类令牌，两边同时用一个快照时，服务端可能把旧的判为失效，表现就是浏览器和脚本一起被登出。跑脚本时先关掉 rewards 页面，重新导出前也刷新一次页面。
+
 任务：
 
 | 任务 | 说明 |
