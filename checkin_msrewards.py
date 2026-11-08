@@ -523,15 +523,27 @@ class Web:
         return f"{status} {progress}/{maximum}（{detail}）"
 
     # ---- 每日活动 ----
-    def earn_page(self) -> str:
+    def earn_page(self, retry: bool = True) -> str:
+        """取 /earn 页面。会话过期时会先试着静默续登一次，续不上就报错，别拿失效会话硬发上报。"""
         r = self.s.get(
             f"{REWARDS}/earn",
             headers=nav_headers(self.pc, self.last_url or f"{BING}/", "same-site"),
             timeout=20,
         )
-        if "/earn" not in r.url:
-            print(f"打开 /earn 被跳转到 {r.url[:80]}")
-        self.last_url = str(r.url)
+        url = str(r.url)
+        if "login.live.com" in url or "oauth20" in url:
+            if retry and self.has_live:
+                print("rewards 网页会话过期，用 login.live.com 的登录态静默续登")
+                self.sso()
+                return self.earn_page(retry=False)
+            raise ValueError(
+                "rewards.bing.com 网页会话已失效（/earn 被跳到登录页）。"
+                "搜索走的是接口还能用，但每日活动必须在登录状态下上报，"
+                "请按 README 重新导出 rewards.bing.com 和 login.live.com 的 Cookie"
+            )
+        if "/earn" not in url:
+            print(f"打开 /earn 被跳转到 {url[:80]}")
+        self.last_url = url
         return r.text
 
     @staticmethod
@@ -649,9 +661,30 @@ class Web:
         ]
         r = self.s.post(f"{REWARDS}/earn", data=json.dumps(body, ensure_ascii=False).encode(), headers=headers,
                         timeout=20, allow_redirects=False)
-        ok = r.status_code < 300 and bool(re.search(r"^\d+:true\s*$", r.text, re.M))
-        detail = f"HTTP {r.status_code} {r.headers.get('content-type', '')[:30]} {r.text[:120]!r}"
+        ok, reason = self.action_result(r.status_code, r.text)
+        detail = f"{reason}（HTTP {r.status_code} {r.text[:120]!r}）"
         return ok, detail
+
+    @staticmethod
+    def action_result(status: int, text: str) -> tuple[bool, str]:
+        """server action 的响应是 RSC，只有 `1:true` 才算服务器真的认了。
+
+        会话失效时服务端不会报错，而是返回重定向（`$@` 引用）或 `1:false`，
+        这两种要区分开：前者别再往下试，后者说明活动本身没通过。
+        """
+        if status >= 400:
+            return False, f"HTTP {status}"
+        if re.search(r"^\d+:true\s*$", text, re.M):
+            return True, "服务器已确认"
+        if (
+            "login.live.com" in text
+            or "NEXT_REDIRECT" in text
+            or re.search(r'"a"\s*:\s*"\$@', text)  # RSC 的重定向记录：{"a":"$@...","i":false}
+        ):
+            return False, "网页会话已失效，服务端把上报重定向到了登录页"
+        if re.search(r"^\d+:false\s*$", text, re.M):
+            return False, "服务端返回 false（活动无效或已领过）"
+        return False, "响应里没有确认标记"
 
     @staticmethod
     def today_promotions(dash: dict) -> list[dict]:
@@ -688,9 +721,14 @@ class Web:
         blocked_at = ""
         for i, p in enumerate(todo):
             ok, detail = self.report_once(action_id, dpl, p)
-            print(f"上报 {p['offerId']}：{'服务器已确认' if ok else '服务器没确认'}")
+            print(f"上报 {p['offerId']}：{'服务器已确认' if ok else detail.split('（')[0]}")
             if not ok and i < 2:
                 print(f"  响应：{detail}")
+            if not ok and "会话已失效" in detail:
+                # 会话都掉了，剩下的活动再发也是白打，直接收手并说明原因。
+                blocked_at = "网页会话已失效，停止剩余活动，请重新导出 Cookie"
+                print(blocked_at)
+                break
             if not ok and ("HTTP 403" in detail or "HTTP 429" in detail):
                 blocked_at = f"第 {i + 1} 个活动被限流，停止剩余活动"
                 print(blocked_at)
@@ -700,10 +738,13 @@ class Web:
         after = {p.get("offerId"): p for p in self.today_promotions(self.userinfo())}
         after_web = {}
         if source == "/earn":
-            after_web = {
-                p["offerId"]: p
-                for p in self.earn_offers(self.earn_page(), include_completed=True)
-            }
+            try:
+                after_web = {
+                    p["offerId"]: p
+                    for p in self.earn_offers(self.earn_page(), include_completed=True)
+                }
+            except Exception as e:  # 复读失败不该把已经做过的活动一起算丢
+                print(f"复读 /earn 失败，只用接口状态判断：{type(e).__name__}: {e}")
 
         def finished(p: dict) -> bool:
             current = after.get(p["offerId"]) or {}
@@ -821,13 +862,23 @@ class App:
         if self.complete(attrs):
             return "今天已签到"
         before = self.number(dash.get("balance"))
-        self.submit(103, {})
-        human_sleep(2, 0.5)
-        after_dash = self.dashboard()
-        after_attrs = self.promotion(after_dash, "checkin") or {}
-        after = self.number(after_dash.get("balance"))
+        # 其他 App 活动上报都带 offerid，签到也带上；接口没给就退回原来的空属性。
+        offer_id = str(attrs.get("offerid") or "").strip()
+        self.submit(103, {"offerid": offer_id} if offer_id else {})
+        after = before
+        confirmed = False
+        for wait in (3, 8):  # 面板有缓存，第一次没确认时隔几秒再看一次
+            human_sleep(wait, 0.4)
+            after_dash = self.dashboard()
+            after_attrs = self.promotion(after_dash, "checkin") or {}
+            after = self.number(after_dash.get("balance"))
+            if self.complete(after_attrs) or (
+                before is not None and after is not None and after > before
+            ):
+                confirmed = True
+                break
         gained = after - before if before is not None and after is not None else 0
-        if self.complete(after_attrs) or gained > 0:
+        if confirmed:
             return f"成功，+{gained}" if gained > 0 else "成功，任务状态已确认"
         return f"已提交但未确认计分（{before} → {after}），请稍后核对面板"
 
