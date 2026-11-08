@@ -152,6 +152,9 @@ def main() -> int:
         value = values.get(name)
         print(f"   {name:<12} {'有  ' + mask(value) if value else '缺失'}")
     missing = [n for n in ("_U", "RPSSecAuth", "MSPAuth", "_C_Auth") if n not in values]
+    dead = [n for n in ("MSPAuth", "MSPProf") if values.get(n, "").strip().lower() == "disabled"]
+    if dead:
+        print(f"   {'/'.join(dead)} 是 Disabled 占位值：浏览器那边已经登出，不是导出漏了字段")
     print()
 
     profile, _ = msr.device_set(values.get("MUID", ""))
@@ -185,6 +188,8 @@ def main() -> int:
 
     print("结论")
     ok = [k for k, v in results.items() if v.startswith("正常")]
+    if dead:
+        print(f"   浏览器侧已经登出（{'/'.join(dead)} 只是占位值），先在浏览器重新登录再导出。")
     if missing:
         print(f"   导出不完整：缺 {'、'.join(missing)}。重新导出，三处域名都要有。")
     if ok:

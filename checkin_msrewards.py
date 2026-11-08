@@ -343,11 +343,22 @@ class Web:
         missing = self.missing_cookies()
         if missing:
             print("提示：缺少登录 Cookie " + "、".join(missing) + "，网页端大概率会报登录失效")
+        dead = self.placeholder_cookies()
+        if dead:
+            print(f"提示：{'/'.join(dead)} 的值是 Disabled 占位值，浏览器那边已经登出，重新登录后再导出")
 
     def missing_cookies(self) -> list[str]:
         """导出里应该有的登录态 Cookie，缺了就说明这份导出不全。"""
         names = {c["name"] for c in self.cookies}
         return [n for n in ("_U", "RPSSecAuth", "MSPAuth", "_C_Auth") if n not in names]
+
+    def placeholder_cookies(self) -> list[str]:
+        """微软在未登录时会把 MSPAuth / MSPProf 写成 Disabled，这种值不可能是有效票据。"""
+        return [
+            c["name"]
+            for c in self.cookies
+            if c["name"] in ("MSPAuth", "MSPProf") and c["value"].strip().lower() == "disabled"
+        ]
 
     def warm_up(self) -> None:
         """先开一次首页，让 Bing 自己下发 MUID、SRCHHPGUSR 等 Cookie，再开始搜索。"""
@@ -368,7 +379,10 @@ class Web:
 
     def _login_expired(self, detail: str) -> ValueError:
         miss = self.missing_cookies()
+        dead = self.placeholder_cookies()
         hint = f"；这份导出还缺 {'、'.join(miss)}" if miss else ""
+        if dead:
+            hint += f"；{'/'.join(dead)} 只是 Disabled 占位值，说明浏览器已经登出"
         return ValueError(
             f"{detail}{hint}。这组 Cookie 已经不能换到登录态了，"
             "通常是对应的登录态已过期、账号在别处被登出，或微软要求重新验证。"

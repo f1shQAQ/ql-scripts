@@ -145,9 +145,12 @@ python tools/msr_probe.py cookies.json     # 也可以 MSR_COOKIE='...' python t
 | 现象 | 含义 |
 |---|---|
 | `getuserinfo` 401 + 静默登录 `login_required` | 这组 Cookie 已经换不到登录态，必须重新登录后导出；**先别再跑脚本**，反复失败只会让风控更紧 |
+| `MSPAuth` / `MSPProf` 的值是 `Disabled` | 浏览器那边已经登出，微软只是写了占位值；不是导出漏字段，先在浏览器重新登录 |
 | 关键 Cookie 缺 `RPSSecAuth` / `MSPAuth` / `_C_Auth` | 导出不全，多半只导了某一个域名 |
 | requests 正常、curl_cffi 401 | 传输层差异，先 `MSR_IMPERSONATE=off` 跑一次对比 |
 | 全部正常但脚本仍报错 | 把完整日志贴出来，多半是接口改版 |
+
+一份能用的导出至少要有 `_U`、`RPSSecAuth`、`_C_Auth`，并且 `MSPAuth` 不是 `Disabled`。
 
 另外，**浏览器的登录态和脚本不要长期共用**。微软会轮换 `RPSSecAuth` 这类令牌，两边同时用一个快照时，服务端可能把旧的判为失效，表现就是浏览器和脚本一起被登出。跑脚本时先关掉 rewards 页面，重新导出前也刷新一次页面。
 
