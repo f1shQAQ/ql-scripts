@@ -347,14 +347,6 @@ class XiaoHeiHe:
         }
 
     def sign(self) -> str:
-        """签到，返回结果文本。"""
-        r = self.get("/task/sign_v3/sign")
-        if r.get("status") != "ok":
-            raise SignError(str(r.get("msg") or r))
-        if str((r.get("result") or {}).get("state")) == "ignore":
-            return "今天已签到"
-
-    def sign(self) -> str:
         """签到。状态接口有时滞后，用任务列表兜底判断是否真的完成。"""
         r = self.get("/task/sign_v3/sign")
         if r.get("status") != "ok":

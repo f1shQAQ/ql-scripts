@@ -22,7 +22,7 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 参数依次是：仓库地址、白名单（只把 `checkin_` 开头的文件建成任务）、黑名单、依赖文件、分支、文件后缀。
 
-依赖：在「依赖管理 → Python3」里添加 `requests`（青龙一般自带）。
+依赖：在「依赖管理 → Python3」里添加 `requests`（青龙一般自带）。可选装 `curl_cffi`，Microsoft Rewards 脚本会用它伪装 TLS 指纹。
 
 推送：默认走面板「系统设置 → 通知设置」（需要青龙 2.18+）。这条推送失败时，改用青龙自带的 `notify.py`，它读「配置文件」里的 `TG_BOT_TOKEN`、`PUSH_KEY` 等变量。用环境变量 `QL_NOTIFY_MODE` 可以改推送方式：
 
@@ -107,16 +107,18 @@ App 的 `hkey` 由客户端 native 代码计算，纯脚本算不了，所以脚
 
 ### Microsoft Rewards（国区，cn.bing.com）
 
-> Microsoft Rewards 条款禁止自动化，有封号风险，没兑换的积分会作废。脚本不含防检测代码。
+> Microsoft Rewards 条款禁止自动化，有封号风险，没兑换的积分会作废。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MSR_COOKIE` | 无 | 用插件导出，见下面「获取 MSR_COOKIE」。多个账号用 `&&` 分隔。 |
 | `MSR_REFRESH_TOKEN` | 无 | 可选，用于 App 签到、阅读和其他 App 活动。在本地运行 `python tools/msr_token.py` 获取。多账号按 `MSR_COOKIE` 的顺序排。微软返回新 token 时，脚本自动写回这个变量（需要青龙 2.18+）。 |
 | `MSR_SEARCH` | `true` | `false` 时不做搜索。 |
-| `MSR_SEARCH_DELAY` | `15` | 两次搜索之间的秒数，最小 5。 |
-| `MSR_READ_DELAY` | `3` | 两次阅读上报之间的秒数，最小 1。 |
+| `MSR_SEARCH_DELAY` | `15` | 两次搜索之间的基准秒数，最小 5。实际等待在基准的 0.5～1.8 倍之间抖动。 |
+| `MSR_READ_DELAY` | `3` | 两次阅读上报之间的秒数，最小 1。调大更接近真实阅读。 |
 | `MSR_APP_PROMOTIONS` | `true` | `false` 时跳过签到、阅读以外的其他 App 活动。 |
+| `MSR_STEALTH` | `true` | `false` 时关掉设备档案、请求头补全和节奏抖动，只发最简请求，用于排查「加了请求头反而报错」。 |
+| `MSR_IMPERSONATE` | `auto` | `off` 时即使装了 `curl_cffi` 也不做 TLS 指纹伪装。 |
 
 #### 获取 MSR_COOKIE
 
@@ -140,6 +142,20 @@ rewards.bing.com 的会话 Cookie 很快过期，只复制请求头会一直报 
 | 其他 App 活动 | 自动处理面板中可上报的 `sapphire` 活动，可用 `MSR_APP_PROMOTIONS=false` 关闭 |
 
 单个任务失败不会中断同一账号的其他任务；网页 Cookie 失效时仍会尝试独立的 App 任务。
+
+#### 关于风控
+
+脚本不做硬绕过，只是让请求别那么像脚本：
+
+- **设备档案**：每个账号固定一套 UA + Client Hints（`sec-ch-ua*`）+ 平台，大版本统一，电脑端和手机端共用同一个 Edge 大版本，像一个真人的两台设备。档案按账号的 `MUID` 派生、按月轮换，同一个号每天跑看到的都是同一台设备，不会今天 Windows 明天换安卓。版本号跟着当前稳定版走，落后一两个大版本最像自动更新过的机器。
+- **请求头**：补上浏览器会发的 `sec-fetch-*`、`Upgrade-Insecure-Requests`、`Accept`、`Accept-Language`；`Accept-Encoding` 只声明 requests 实际能解的编码，免得拿到 br 解不开。`Origin` 只在 POST 上带（Fetch 规范如此），GET 带上反而露馅。
+- **Referer 链**：搜索前先开一次 Bing 首页，让站点自己下发 `MUID`、`SRCHHPGUSR` 等 Cookie；之后的搜索从上一页点过来，偶尔当作新开标签页。
+- **节奏**：间隔按对数正态抖动，不再固定 15 秒；中间小概率插入几十秒空档；多账号之间至少隔一分钟，每个账号开局也有随机延迟；电脑端和手机端的先后顺序每次随机。
+- **及时收手**：遇到 403 / 418 / 429 或验证码页面立刻停掉该项，不重试、不加压。被盯上还继续刷，比少拿几分危险得多。
+
+想要更强的传输层伪装，可以在青龙「依赖管理 → Python3」里装 `curl_cffi`，脚本会自动改用它走 Chrome 的 TLS/HTTP2 指纹；没装就用 requests，行为不变。
+
+需要说明的是：TLS 指纹（JA3/JA4）由客户端决定，只靠请求头改不了；装了 `curl_cffi` 才有改善。以上都只是降低特征，**不能保证不被风控**，介意风险就别跑。
 
 ## 安全
 

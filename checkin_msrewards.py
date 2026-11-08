@@ -17,23 +17,32 @@ Microsoft Rewards 国区每日任务（cn.bing.com）：
                         多个账号按 MSR_COOKIE 的顺序排列，用换行或 "&&" 分隔。
                         脚本会把微软返回的新 token 自动写回这个变量（需要青龙 2.18+）。
     MSR_SEARCH          "false" 时不做搜索，默认 true。
-    MSR_SEARCH_DELAY    两次搜索之间的间隔秒数，默认 15。
+    MSR_SEARCH_DELAY    两次搜索之间的基准间隔秒数，默认 15，实际等待在对数正态上抖动。
     MSR_READ_DELAY      两次阅读上报之间的间隔秒数，默认 3。
     MSR_APP_PROMOTIONS  "false" 时不做其他 App 活动，默认 true。
+    MSR_STEALTH         "false" 时退回最简请求头，只用于排查问题，默认开启。
+    MSR_IMPERSONATE     "off" 时即使装了 curl_cffi 也不伪装 TLS 指纹，默认 auto。
 
 接口参考 TheNetsky/Microsoft-Rewards-Script 和 Greasy Fork 脚本 560503。
 Microsoft Rewards 条款禁止自动化，账号有被封的风险。
+
+脚本尽量让请求看起来像正常浏览：每个账号固定一套自洽的设备档案、补全浏览器会发的
+请求头和 Referer 链、节奏按对数正态抖动、被限流就立刻收手。装了 curl_cffi 时走 Chrome
+的 TLS/HTTP2 指纹，没装就只能用 requests 的指纹——这些都只是减少特征，不能保证不被风控。
 """
 
 from __future__ import annotations
 
 import html
 import json
+import math
+import os
 import random
 import re
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote
 
@@ -57,22 +66,17 @@ TOKEN_URL = "https://login.live.com/oauth20_token.srf"
 CLIENT_ID = "0000000040170455"
 SCOPE = "service::prod.rewardsplatform.microsoft.com::MBI_SSL"
 
-PC_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
-)
-MOBILE_UA = (
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.0.0"
-)
 APP_HEADERS = {
     "X-Rewards-AppId": "SAAndroid/34.5.450113001",
     "X-Rewards-IsMobile": "true",
     "X-Rewards-Country": "cn",
     "X-Rewards-PartnerId": "startapp",
     "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) BingSapphire/34.5.450113001",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
 }
 POINTS_PER_SEARCH = 3
+STEALTH = env_bool("MSR_STEALTH", True)
 
 FALLBACK_WORDS = [
     "今日天气", "新闻热点", "汇率查询", "高铁时刻表", "电影推荐", "家常菜做法", "健身计划",
@@ -83,12 +87,201 @@ FALLBACK_WORDS = [
 ]
 
 
+# ---------------------------------------------------------------- 浏览器伪装
+
+# 一个账号在整个运行期固定一套设备档案：UA 大版本、Client Hints、平台三者必须互相
+# 对得上，版本号拼错比不伪装更容易被识别。
+# 版本号跟着当前稳定版走，落后一两个大版本最像一个自动更新过的真实设备；停在两年
+# 前的版本本身就是特征。2026-11 稳定版是 157，过段时间记得往上调。
+EDGE_MAJORS = ("155", "156", "157")
+# Chromium 的 GREASE 品牌，随便挑一个真实出现过的组合即可。
+GREASE_BRANDS = ('"Not_A Brand";v="8"', '"Not A(Brand";v="99"')
+ANDROID_DEVICES = (("14", "Pixel 8"), ("14", "22081212C"), ("13", "SM-S9110"), ("12", "M2102K1AC"))
+SEARCH_FORMS = ("QBLH", "QBRE", "QBLG")
+HTML_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,"
+    "image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+)
+BLOCK_HINTS = ("captcha", "unusual traffic", "verify you are human", "too many requests")
+
+
+class Blocked(RuntimeError):
+    """被限流或风控。继续重试只会更糟，直接收手。"""
+
+
+@dataclass(frozen=True)
+class Profile:
+    ua: str
+    ch_ua: str
+    mobile_hint: str
+    platform: str
+    language: str = "zh-CN,zh;q=0.9,en;q=0.8"
+
+
+def accept_encoding() -> str:
+    """requests 能解哪些压缩就声明哪些，别报自己解不了的编码。"""
+    try:
+        from requests.utils import default_headers
+
+        return str(default_headers().get("Accept-Encoding") or "gzip, deflate")
+    except Exception:  # noqa: BLE001
+        return "gzip, deflate"
+
+
+ACCEPT_ENCODING = accept_encoding()
+
+
+def device_set(seed_text: str = "") -> tuple[Profile, Profile]:
+    """抽一套电脑 + 手机档案，共用一个 Edge 大版本，像同一个人的两台设备。
+
+    给了 seed_text（账号的 MUID）就按「账号 + 月份」派生，同一个账号不会每天换设备；
+    不给就每次随机。
+    """
+    rng = random.Random(f"{seed_text}:{datetime.now():%Y-%m}") if seed_text else random
+    major = rng.choice(EDGE_MAJORS)
+    ch_ua = f'{rng.choice(GREASE_BRANDS)}, "Chromium";v="{major}", "Microsoft Edge";v="{major}"'
+    pc = Profile(
+        ua=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36 Edg/{major}.0.0.0"
+        ),
+        ch_ua=ch_ua,
+        mobile_hint="?0",
+        platform="Windows",
+    )
+    android, model = rng.choice(ANDROID_DEVICES)
+    mobile = Profile(
+        ua=(
+            f"Mozilla/5.0 (Linux; Android {android}; {model}) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Mobile Safari/537.36 EdgA/{major}.0.0.0"
+        ),
+        ch_ua=ch_ua,
+        mobile_hint="?1",
+        platform="Android",
+    )
+    return pc, mobile
+
+
+def new_browser_session(profile: Profile):
+    """装了 curl_cffi 就用 Chrome 的 TLS/HTTP2 指纹，没装退回 requests。"""
+    mode = os.getenv("MSR_IMPERSONATE", "auto").strip().lower()
+    if STEALTH and mode != "off":
+        try:
+            from curl_cffi import requests as curl_requests
+        except ImportError:
+            curl_requests = None
+        if curl_requests is not None:
+            try:
+                session = curl_requests.Session(impersonate="chrome")
+                session.headers.update({"User-Agent": profile.ua, "Accept-Language": profile.language})
+                print("传输层：curl_cffi（Chrome 指纹）")
+                return session
+            except Exception as e:  # noqa: BLE001
+                print(f"curl_cffi 初始化失败，退回 requests：{type(e).__name__}: {e}")
+    if STEALTH:
+        print("传输层：requests（TLS 指纹伪装不了）")
+    return new_session({"User-Agent": profile.ua, "Accept-Language": profile.language})
+
+
+def set_cookie(session, name: str, value: str, domain: str) -> None:
+    session.cookies.set(name, value, domain=domain, path="/")
+
+
+def _base_headers(profile: Profile) -> dict[str, str]:
+    if not STEALTH:
+        return {"User-Agent": profile.ua}
+    return {
+        "User-Agent": profile.ua,
+        "Accept-Language": profile.language,
+        "Accept-Encoding": ACCEPT_ENCODING,
+        "sec-ch-ua": profile.ch_ua,
+        "sec-ch-ua-mobile": profile.mobile_hint,
+        "sec-ch-ua-platform": f'"{profile.platform}"',
+        "DNT": "1",
+    }
+
+
+def nav_headers(profile: Profile, referer: str | None = None, site: str = "same-origin") -> dict[str, str]:
+    """地址栏跳转（GET 页面）时浏览器会发的头。"""
+    headers = _base_headers(profile)
+    if STEALTH:
+        headers.update(
+            {
+                "Accept": HTML_ACCEPT,
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": site,
+                "Sec-Fetch-User": "?1",
+            }
+        )
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
+def xhr_headers(
+    profile: Profile,
+    referer: str,
+    origin: str | None = None,
+    requested_with: bool = True,
+    dest: str = "empty",
+) -> dict[str, str]:
+    """页面脚本发起 fetch / XHR 时的头。
+
+    Origin 只在非 GET 请求里带（Fetch 规范如此），GET 带上反而露馅。
+    """
+    headers = _base_headers(profile)
+    if STEALTH:
+        headers.update(
+            {
+                "Accept": "*/*",
+                "Sec-Fetch-Dest": dest,
+                "Sec-Fetch-Mode": "cors" if dest == "empty" else "no-cors",
+                "Sec-Fetch-Site": "same-origin",
+            }
+        )
+    if origin:
+        headers["Origin"] = origin
+    headers["Referer"] = referer
+    if requested_with:
+        headers["X-Requested-With"] = "XMLHttpRequest"
+    return headers
+
+
+def human_sleep(seconds: float, spread: float = 0.35) -> None:
+    """对数正态抖动。固定间隔、均匀分布本身就是特征。"""
+    base = max(float(seconds), 1.0)
+    try:
+        value = random.lognormvariate(math.log(base), spread)
+    except (ValueError, OverflowError):
+        value = base
+    time.sleep(min(max(value, base * 0.5), base * 1.8))
+
+
+def idle_pause() -> None:
+    """小概率走开一会儿，让整串请求里出现真人会有的空档。"""
+    if STEALTH and random.random() < 0.12:
+        time.sleep(random.uniform(25, 80))
+
+
+def block_reason(status: int, text: str) -> str:
+    """命中限流或验证码时返回一句话说明，没命中返回空串。"""
+    if status in (403, 418, 429):
+        return f"HTTP {status}"
+    low = text[:6000].lower()
+    for hint in BLOCK_HINTS:
+        if hint in low:
+            return hint
+    return ""
+
+
 # ---------------------------------------------------------------- 搜索词
 
-def hot_words() -> list[str]:
+def hot_words(ua: str = "") -> list[str]:
     """取百度、微博热搜做搜索词，都失败时用内置词表。"""
     words: list[str] = []
-    s = new_session()
+    s = new_session({"User-Agent": ua} if ua else None)
     try:
         data = safe_json(s.get("https://top.baidu.com/api/board?platform=wise&tab=realtime", timeout=10))
         for card in (data.get("data") or {}).get("cards") or []:
@@ -114,8 +307,12 @@ def hot_words() -> list[str]:
 
 class Web:
     def __init__(self, cookie_text: str):
-        self.s = new_session()
         self.cookies = parse_cookie_export(cookie_text, ".bing.com")
+        # 用 MUID 当种子，同一个账号固定一套设备档案，不会每次运行都换一台「新电脑」。
+        seed = next((c["value"] for c in self.cookies if c["name"] == "MUID"), "")
+        self.pc, self.mobile = device_set(seed)
+        self.s = new_browser_session(self.pc)
+        self.last_url = ""
         for c in self.cookies:
             self.s.cookies.set(c["name"], c["value"], domain=c["domain"], path=c["path"], secure=c["secure"])
         self.has_live = any("live.com" in c["domain"] for c in self.cookies)
@@ -123,20 +320,35 @@ class Web:
         for c in self.cookies:
             domains[c["domain"]] = domains.get(c["domain"], 0) + 1
         print("读到的 Cookie：" + "，".join(f"{d} {n} 个" for d, n in domains.items()))
+        print(f"浏览器伪装：{'关闭' if not STEALTH else '开启'}，设备 {self.pc.platform} / {self.mobile.platform}")
         if not any(c["name"] == "_U" for c in self.cookies):
             print("提示：没有 _U，Bing 搜索可能不计分")
+
+    def warm_up(self) -> None:
+        """先开一次首页，让 Bing 自己下发 MUID、SRCHHPGUSR 等 Cookie，再开始搜索。"""
+        try:
+            self.s.get(f"{BING}/", headers=nav_headers(self.pc, site="none"), timeout=20)
+        except Exception as e:  # noqa: BLE001
+            print(f"预热首页失败（不影响后续）：{type(e).__name__}: {e}")
+        self.last_url = f"{BING}/"
+        human_sleep(3)
 
     def _get_userinfo(self):
         return self.s.get(
             f"{REWARDS}/api/getuserinfo",
             params={"type": 1, "X-Requested-With": "XMLHttpRequest", "_": int(time.time() * 1000)},
-            headers={"Referer": f"{REWARDS}/", "X-Requested-With": "XMLHttpRequest"},
+            headers=xhr_headers(self.pc, f"{REWARDS}/"),
             timeout=20,
         )
 
     def sso(self) -> None:
         """rewards.bing.com 的会话过期后，用 login.live.com 的登录态静默续登，和浏览器自动跳转的过程一样。"""
-        r = self.s.get(f"{REWARDS}/Signin", params={"idru": "/", "silent": "True"}, timeout=20)
+        r = self.s.get(
+            f"{REWARDS}/Signin",
+            params={"idru": "/", "silent": "True"},
+            headers=nav_headers(self.pc, f"{REWARDS}/", "same-site"),
+            timeout=20,
+        )
         for _ in range(4):
             form = re.search(r"<form[^>]*\baction=\"([^\"]+)\"[^>]*>(.*?)</form>", r.text, re.S | re.I)
             if not form:
@@ -185,12 +397,20 @@ class Web:
     # ---- 搜索 ----
     def search_once(self, word: str, mobile: bool) -> tuple[bool, int | None]:
         """执行一次搜索上报，返回（HTTP 上报是否成功，本次确认增加的积分）。"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        self.s.cookies.set("_Rwho", f"u={'m' if mobile else 'd'}&ts={today}", domain=".bing.com", path="/")
-        headers = {"User-Agent": MOBILE_UA if mobile else PC_UA}
+        profile = self.mobile if mobile else self.pc
         cvid = uuid.uuid4().hex.upper()
-        url = f"{BING}/search?q={quote(word)}&form=QBLH&cvid={cvid}"
-        page = self.s.get(url, headers=headers, timeout=20)
+        # form 每次随机，真实的 Bing 入口不止一种；URL 结构保持和地址栏一致。
+        url = f"{BING}/search?q={quote(word)}&form={random.choice(SEARCH_FORMS)}&cvid={cvid}"
+        # 多数时候从上一页点过来，偶尔当作新开标签页，Referer 链不该永远是空的。
+        referer = self.last_url if self.last_url and random.random() > 0.2 else None
+        page = self.s.get(
+            url,
+            headers=nav_headers(profile, referer, "same-origin" if referer else "none"),
+            timeout=20,
+        )
+        hit = block_reason(page.status_code, page.text)
+        if hit:
+            raise Blocked(f"搜索页被拦截（{hit}）")
         if page.status_code >= 400:
             return False, None
         m = re.search(r'\b["\']?IG["\']?\s*:\s*["\']([0-9A-F]{32})["\']', page.text, re.I)
@@ -199,13 +419,9 @@ class Web:
         if not m:
             return False, None
         ig = m.group(1)
-        post_headers = {
-            **headers,
-            "Referer": url,
-            "Origin": BING,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-        }
+        self.last_url = url
+        post_headers = xhr_headers(profile, url, BING)
+        post_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
         self.s.post(
             f"{BING}/rewardsapp/ncheader",
             params={"ver": "88888888", "IID": "SERP.5047", "IG": ig, "ajaxreq": 1},
@@ -220,6 +436,9 @@ class Web:
             headers=post_headers,
             timeout=20,
         )
+        hit = block_reason(r.status_code, r.text)
+        if hit:
+            raise Blocked(f"上报接口被拦截（{hit}）")
         gained = None
         match = re.search(r"ModernRewards\.ReportActivity\((\{[\s\S]*?\})\)\s*;", r.text)
         if match:
@@ -240,6 +459,12 @@ class Web:
         if progress >= maximum:
             return f"已完成 {progress}/{maximum}"
 
+        # 电脑端和手机端各自再打乱一次，否则两端会用完全相同的顺序搜同一批词。
+        random.shuffle(words)
+        # 浏览器在当天首次搜索时写一次 _Rwho；两端各写各的值，不该每次请求都改。
+        today = datetime.now().strftime("%Y-%m-%d")
+        set_cookie(self.s, "_Rwho", f"u={'m' if mobile else 'd'}&ts={today}", ".bing.com")
+
         # 向上取整，避免剩余积分不是 3 的倍数时少算一次；额外余量用于不计分的搜索。
         budget = (maximum - progress + POINTS_PER_SEARCH - 1) // POINTS_PER_SEARCH + 6
         stalls = 0
@@ -254,6 +479,11 @@ class Web:
             attempts += 1
             try:
                 ok, gained = self.search_once(word, mobile)
+            except Blocked as e:
+                # 已经被盯上了就别再补请求，停下比刷满更划算。
+                stop_reason = f"触发风控（{e}），停止后续搜索"
+                print(stop_reason)
+                break
             except Exception as e:  # 单次网络错误不应终止其他搜索和后续任务
                 ok, gained = False, None
                 print(f"搜索请求异常（{word}）：{type(e).__name__}: {e}")
@@ -267,7 +497,8 @@ class Web:
                 if consecutive_failures >= 3:
                     stop_reason = "连续 3 次上报失败"
                     break
-            time.sleep(delay + random.uniform(0, 5))
+            human_sleep(delay)
+            idle_pause()
             if accepted > checked_accepted and (accepted % 3 == 0 or bool(gained and gained > 0)):
                 checked_accepted = accepted
                 new_progress, maximum = self.counter(self.userinfo(), name)
@@ -293,9 +524,14 @@ class Web:
 
     # ---- 每日活动 ----
     def earn_page(self) -> str:
-        r = self.s.get(f"{REWARDS}/earn", timeout=20)
+        r = self.s.get(
+            f"{REWARDS}/earn",
+            headers=nav_headers(self.pc, self.last_url or f"{BING}/", "same-site"),
+            timeout=20,
+        )
         if "/earn" not in r.url:
             print(f"打开 /earn 被跳转到 {r.url[:80]}")
+        self.last_url = str(r.url)
         return r.text
 
     @staticmethod
@@ -357,15 +593,25 @@ class Web:
         action ID 每次网站发版都会变，所以每次从页面引用的 JS 里现找。
         返回 (action ID, 部署号)，找不到时 action ID 为空。
         """
-        page += self.s.get(f"{REWARDS}/about", timeout=20).text  # 公共 JS 也在这里，兜底
+        about = self.s.get(
+            f"{REWARDS}/about",
+            headers=nav_headers(self.pc, f"{REWARDS}/", "same-origin"),
+            timeout=20,
+        )
+        page += about.text  # 公共 JS 也在这里，兜底
         dpl = re.search(r"[?&](?:amp;)?dpl=([\w.-]+)", page) or re.search(r'data-dpl-id="([\w.-]+)"', page)
         chunks = list(dict.fromkeys(re.findall(r"(/_next/static/chunks/[\w\-./()]+?\.js)", page)))
         pattern = re.compile(r'createServerReference\)\("([a-f0-9]{40,64})"[^;]{0,300}?"reportActivity"\)')
         for path in chunks[:80]:
             try:
-                m = pattern.search(self.s.get(f"{REWARDS}{path}", timeout=20).text)
+                r = self.s.get(
+                    f"{REWARDS}{path}",
+                    headers=xhr_headers(self.pc, f"{REWARDS}/earn", requested_with=False, dest="script"),
+                    timeout=20,
+                )
             except Exception:  # noqa: BLE001
                 continue
+            m = pattern.search(r.text)
             if m:
                 return m.group(1), dpl.group(1) if dpl else ""
         return "", dpl.group(1) if dpl else ""
@@ -373,14 +619,16 @@ class Web:
     def report_once(self, action_id: str, dpl: str, promo: dict) -> tuple[bool, str]:
         tree = ["", {"children": ["(nav)", {"children": ["earn", {"children": ["__PAGE__", {}, None, None, 0]},
                                                          None, None, 0]}, None, None, 0]}, None, None, 16]
-        headers = {
-            "Accept": "text/x-component",
-            "Content-Type": "text/plain;charset=UTF-8",
-            "Next-Action": action_id,
-            "Next-Router-State-Tree": quote(json.dumps(tree, separators=(",", ":")), safe=""),
-            "Origin": REWARDS,
-            "Referer": f"{REWARDS}/earn",
-        }
+        # server action 走 fetch，不带 X-Requested-With，Accept 是 RSC 的 text/x-component。
+        headers = xhr_headers(self.pc, f"{REWARDS}/earn", REWARDS, requested_with=False)
+        headers.update(
+            {
+                "Accept": "text/x-component",
+                "Content-Type": "text/plain;charset=UTF-8",
+                "Next-Action": action_id,
+                "Next-Router-State-Tree": quote(json.dumps(tree, separators=(",", ":")), safe=""),
+            }
+        )
         if dpl:
             headers["X-Deployment-Id"] = dpl
         attrs = promo.get("attributes") if isinstance(promo.get("attributes"), dict) else {}
@@ -437,12 +685,18 @@ class Web:
         if not action_id:
             return f"待完成 {len(todo)} 个，但没在网页 JS 里找到 reportActivity（网站可能又改版了），跳过"
         print(f"reportActivity action：{action_id[:12]}…，部署号：{dpl or '未知'}")
+        blocked_at = ""
         for i, p in enumerate(todo):
             ok, detail = self.report_once(action_id, dpl, p)
             print(f"上报 {p['offerId']}：{'服务器已确认' if ok else '服务器没确认'}")
             if not ok and i < 2:
                 print(f"  响应：{detail}")
-            time.sleep(3)
+            if not ok and ("HTTP 403" in detail or "HTTP 429" in detail):
+                blocked_at = f"第 {i + 1} 个活动被限流，停止剩余活动"
+                print(blocked_at)
+                break
+            human_sleep(3)
+            idle_pause()
         after = {p.get("offerId"): p for p in self.today_promotions(self.userinfo())}
         after_web = {}
         if source == "/earn":
@@ -467,6 +721,8 @@ class Web:
         text = f"确认完成 {done}/{len(todo)}"
         if left:
             text += f"，未确认：{'、'.join(left[:5])}"
+        if blocked_at:
+            text += f"，{blocked_at}"
         return text
 
 
@@ -566,7 +822,7 @@ class App:
             return "今天已签到"
         before = self.number(dash.get("balance"))
         self.submit(103, {})
-        time.sleep(2)
+        human_sleep(2, 0.5)
         after_dash = self.dashboard()
         after_attrs = self.promotion(after_dash, "checkin") or {}
         after = self.number(after_dash.get("balance"))
@@ -597,7 +853,7 @@ class App:
             attempts += 1
             try:
                 response = self.submit(101, {"offerid": offer_id})
-                time.sleep(delay)
+                human_sleep(delay, 0.5)
                 after_dash = self.dashboard()
             except Exception as e:  # 保留已获得进度，并把失败原因带回通知
                 stop_reason = f"第 {attempts} 次上报失败：{type(e).__name__}: {e}"
@@ -659,7 +915,7 @@ class App:
             before_balance = self.number(dash.get("balance"))
             try:
                 self.submit(101, {"offerid": offer_id})
-                time.sleep(2)
+                human_sleep(2, 0.5)
                 dash = self.dashboard()
             except Exception as e:
                 print(f"App 活动 {offer_id} 失败：{type(e).__name__}: {e}")
@@ -701,8 +957,12 @@ def handle(cookie: str, index: int) -> str:
     result: list[tuple[str, object]] = []
     web = None
     start = None
+    if STEALTH:
+        # 多账号别在同一秒整整齐齐开始，每个账号有自己的起点。
+        time.sleep(random.uniform(2, 25))
     try:
         web = Web(cookie)
+        web.warm_up()
         dash = web.userinfo()
         start = web.points(dash)
         level = ((dash.get("userStatus") or {}).get("levelInfo") or {}).get("activeLevel", "?")
@@ -713,11 +973,18 @@ def handle(cookie: str, index: int) -> str:
 
     if web is not None and start is not None:
         if env_bool("MSR_SEARCH", True):
-            words = hot_words()
+            words = hot_words(web.pc.ua)
             delay = max(env_int("MSR_SEARCH_DELAY", 15), 5)
-            # 两类搜索各自使用完整词表，不能让手机端继承电脑端 pop 后的剩余词。
-            run_step(result, "电脑搜索", lambda: web.do_searches("pcSearch", False, words.copy(), delay))
-            run_step(result, "手机搜索", lambda: web.do_searches("mobileSearch", True, words.copy(), delay))
+            # 真人不一定先电脑后手机，每次随机；两类搜索各用完整词表，不互相继承 pop 后的剩余。
+            groups = [("电脑搜索", "pcSearch", False), ("手机搜索", "mobileSearch", True)]
+            if random.random() < 0.5:
+                groups.reverse()
+            for label, counter_name, mobile in groups:
+                run_step(
+                    result,
+                    label,
+                    lambda c=counter_name, m=mobile: web.do_searches(c, m, words.copy(), delay),
+                )
         run_step(result, "每日活动", web.do_activities)
 
     tokens = get_accounts("MSR_REFRESH_TOKEN")
@@ -750,4 +1017,11 @@ def handle(cookie: str, index: int) -> str:
 
 
 if __name__ == "__main__":
-    run_accounts("Microsoft Rewards", "MSR_COOKIE", handle, gap_seconds=30, accounts=get_cookie_accounts("MSR_COOKIE"))
+    # 账号之间至少隔一分钟，别让同一出口 IP 上几个账号首尾相接。
+    run_accounts(
+        "Microsoft Rewards",
+        "MSR_COOKIE",
+        handle,
+        gap_seconds=random.randint(60, 180) if STEALTH else 30,
+        accounts=get_cookie_accounts("MSR_COOKIE"),
+    )
