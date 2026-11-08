@@ -5,7 +5,7 @@ new Env('Microsoft Rewards')
 
 Microsoft Rewards 国区每日任务（cn.bing.com）：
     电脑端搜索、手机端搜索、每日活动（Daily Set / More Activities）、
-    Bing App 每日签到、阅读赚积分。
+    Bing App 每日签到、阅读赚积分、其他可上报的 App 活动。
 
 环境变量：
     MSR_COOKIE          推荐用 Cookie-Editor 插件分别在 https://rewards.bing.com 和
@@ -13,11 +13,13 @@ Microsoft Rewards 国区每日任务（cn.bing.com）：
                         有 login.live.com 的 Cookie 时，rewards 会话过期后脚本会自动续登。
                         也支持 cookies.txt 和普通 Cookie 请求头（请求头很快会过期）。
                         多个账号用 "&&" 分隔。
-    MSR_REFRESH_TOKEN   可选。App 签到和阅读用的 refresh token，在本地运行 tools/msr_token.py 获取。
+    MSR_REFRESH_TOKEN   可选。App 签到、阅读和其他 App 活动用的 refresh token，在本地运行 tools/msr_token.py 获取。
                         多个账号按 MSR_COOKIE 的顺序排列，用换行或 "&&" 分隔。
                         脚本会把微软返回的新 token 自动写回这个变量（需要青龙 2.18+）。
     MSR_SEARCH          "false" 时不做搜索，默认 true。
     MSR_SEARCH_DELAY    两次搜索之间的间隔秒数，默认 15。
+    MSR_READ_DELAY      两次阅读上报之间的间隔秒数，默认 3。
+    MSR_APP_PROMOTIONS  "false" 时不做其他 App 活动，默认 true。
 
 接口参考 TheNetsky/Microsoft-Rewards-Script 和 Greasy Fork 脚本 560503。
 Microsoft Rewards 条款禁止自动化，账号有被封的风险。
@@ -31,6 +33,7 @@ import random
 import re
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from urllib.parse import quote
 
@@ -180,16 +183,21 @@ class Web:
         return progress, maximum
 
     # ---- 搜索 ----
-    def search_once(self, word: str, mobile: bool) -> bool:
+    def search_once(self, word: str, mobile: bool) -> tuple[bool, int | None]:
+        """执行一次搜索上报，返回（HTTP 上报是否成功，本次确认增加的积分）。"""
         today = datetime.now().strftime("%Y-%m-%d")
         self.s.cookies.set("_Rwho", f"u={'m' if mobile else 'd'}&ts={today}", domain=".bing.com", path="/")
         headers = {"User-Agent": MOBILE_UA if mobile else PC_UA}
         cvid = uuid.uuid4().hex.upper()
         url = f"{BING}/search?q={quote(word)}&form=QBLH&cvid={cvid}"
         page = self.s.get(url, headers=headers, timeout=20)
-        m = re.search(r'IG:"([0-9A-F]+)"', page.text)
+        if page.status_code >= 400:
+            return False, None
+        m = re.search(r'\b["\']?IG["\']?\s*:\s*["\']([0-9A-F]{32})["\']', page.text, re.I)
         if not m:
-            return False
+            m = re.search(r"[?&]IG=([0-9A-F]{32})\b", page.text, re.I)
+        if not m:
+            return False, None
         ig = m.group(1)
         post_headers = {
             **headers,
@@ -207,12 +215,22 @@ class Web:
         )
         r = self.s.post(
             f"{BING}/rewardsapp/reportActivity",
-            params={"IG": ig, "IID": "SERP.5047", "q": word, "ajaxreq": 1},
+            params={"IG": ig, "IID": "SERP.5064", "FORM": "ANNTA1", "q": word, "cvid": cvid, "ajaxreq": 1},
             data={"url": url, "V": "web"},
             headers=post_headers,
             timeout=20,
         )
-        return r.status_code < 400
+        gained = None
+        match = re.search(r"ModernRewards\.ReportActivity\((\{[\s\S]*?\})\)\s*;", r.text)
+        if match:
+            try:
+                session = (json.loads(match.group(1)).get("RewardsSessionData") or {})
+                balance, previous = session.get("Balance"), session.get("PreviousBalance")
+                if isinstance(balance, (int, float)) and isinstance(previous, (int, float)):
+                    gained = int(balance - previous)
+            except (ValueError, TypeError, AttributeError):
+                pass
+        return r.status_code < 400, gained
 
     def do_searches(self, name: str, mobile: bool, words: list[str], delay: int) -> str:
         dash = self.userinfo()
@@ -222,24 +240,56 @@ class Web:
         if progress >= maximum:
             return f"已完成 {progress}/{maximum}"
 
-        budget = (maximum - progress) // POINTS_PER_SEARCH + 6  # 多几次，防止个别搜索不计分
+        # 向上取整，避免剩余积分不是 3 的倍数时少算一次；额外余量用于不计分的搜索。
+        budget = (maximum - progress + POINTS_PER_SEARCH - 1) // POINTS_PER_SEARCH + 6
         stalls = 0
-        done = 0
-        while done < budget and words:
-            self.search_once(words.pop(), mobile)
-            done += 1
+        attempts = 0
+        accepted = 0
+        checked_accepted = 0
+        credited = 0
+        consecutive_failures = 0
+        stop_reason = ""
+        while attempts < budget and words:
+            word = words.pop()
+            attempts += 1
+            try:
+                ok, gained = self.search_once(word, mobile)
+            except Exception as e:  # 单次网络错误不应终止其他搜索和后续任务
+                ok, gained = False, None
+                print(f"搜索请求异常（{word}）：{type(e).__name__}: {e}")
+            if ok:
+                accepted += 1
+                consecutive_failures = 0
+                credited += gained if gained and gained > 0 else 0
+            else:
+                consecutive_failures += 1
+                print(f"搜索未成功上报：{word}")
+                if consecutive_failures >= 3:
+                    stop_reason = "连续 3 次上报失败"
+                    break
             time.sleep(delay + random.uniform(0, 5))
-            if done % 3 == 0:
+            if accepted > checked_accepted and (accepted % 3 == 0 or bool(gained and gained > 0)):
+                checked_accepted = accepted
                 new_progress, maximum = self.counter(self.userinfo(), name)
                 stalls = stalls + 1 if new_progress <= progress else 0
                 progress = new_progress
                 if progress >= maximum:
                     break
-                if stalls >= 2:  # 连续 6 次搜索积分都没涨，停下
+                if stalls >= 2:  # 连续 6 次已上报搜索积分都没涨，停下
+                    stop_reason = "连续 6 次搜索后计数未增长"
                     break
+        else:
+            if not words and attempts < budget:
+                stop_reason = "搜索词已用完"
+
         progress, maximum = self.counter(self.userinfo(), name)
         status = "完成" if progress >= maximum else "未完成"
-        return f"{status} {progress}/{maximum}（本次搜索 {done} 次）"
+        detail = f"本次尝试 {attempts} 次，成功上报 {accepted} 次"
+        if credited:
+            detail += f"，上报确认 +{credited} 分"
+        if stop_reason and progress < maximum:
+            detail += f"，{stop_reason}"
+        return f"{status} {progress}/{maximum}（{detail}）"
 
     # ---- 每日活动 ----
     def earn_page(self) -> str:
@@ -277,7 +327,7 @@ class Web:
                 depth -= 1
         return None
 
-    def earn_offers(self, page: str) -> list[dict]:
+    def earn_offers(self, page: str, include_completed: bool = False) -> list[dict]:
         """从 /earn 页面的 RSC 数据里取任务（含新版 hash），取不到时返回空列表。"""
         text = self.flight_text(page)
         today = datetime.now().strftime("%Y-%m-%d")
@@ -294,7 +344,7 @@ class Web:
         for o in offers.values():
             done = o.get("isCompleted") is True or o.get("complete") is True
             date = str(o.get("date") or "")[:10]
-            if done or o.get("isLocked") is True or not o.get("hash"):
+            if (done and not include_completed) or o.get("isLocked") is True or not o.get("hash"):
                 continue
             if date and re.match(r"\d{4}-\d{2}-\d{2}$", date) and date > today:
                 continue
@@ -394,18 +444,29 @@ class Web:
                 print(f"  响应：{detail}")
             time.sleep(3)
         after = {p.get("offerId"): p for p in self.today_promotions(self.userinfo())}
-        remaining = {o["offerId"] for o in self.earn_offers(self.earn_page())} if source == "/earn" else set()
+        after_web = {}
+        if source == "/earn":
+            after_web = {
+                p["offerId"]: p
+                for p in self.earn_offers(self.earn_page(), include_completed=True)
+            }
 
         def finished(p: dict) -> bool:
-            if source == "/earn":
-                return p["offerId"] not in remaining
-            return bool((after.get(p["offerId"]) or {}).get("complete"))
+            current = after.get(p["offerId"]) or {}
+            current_web = after_web.get(p["offerId"]) or {}
+            # 解析不到后置状态时必须保持“未确认”，不能把空列表当成全部完成。
+            return bool(
+                current.get("complete") is True
+                or current.get("isCompleted") is True
+                or current_web.get("complete") is True
+                or current_web.get("isCompleted") is True
+            )
 
         done = sum(1 for p in todo if finished(p))
         left = [p.get("title") or p["offerId"] for p in todo if not finished(p)]
-        text = f"完成 {done}/{len(todo)}"
+        text = f"确认完成 {done}/{len(todo)}"
         if left:
-            text += f"，未完成：{'、'.join(left[:5])}"
+            text += f"，未确认：{'、'.join(left[:5])}"
         return text
 
 
@@ -415,6 +476,29 @@ class App:
     def __init__(self, refresh_token: str):
         self.refresh_token = refresh_token
         self.s = new_session(APP_HEADERS)
+
+    @staticmethod
+    def number(value: object) -> int | None:
+        """接口的数字字段有时是字符串；无效值不能悄悄当成 0。"""
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            return int(float(str(value)))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def complete(cls, attrs: dict) -> bool:
+        progress = cls.number(attrs.get("pointprogress") or attrs.get("progress"))
+        maximum = cls.number(attrs.get("pointmax") or attrs.get("max"))
+        return str(attrs.get("complete")).strip().lower() == "true" or bool(
+            maximum and maximum > 0 and progress is not None and progress >= maximum
+        )
+
+    @staticmethod
+    def offer_id(promotion: dict) -> str:
+        attrs = promotion.get("attributes") or {}
+        return str(attrs.get("offerid") or promotion.get("name") or "").strip()
 
     def login(self) -> str:
         """用 refresh token 换 access token，返回微软给的新 refresh token。"""
@@ -435,13 +519,18 @@ class App:
         return data.get("refresh_token") or self.refresh_token
 
     def dashboard(self) -> dict:
-        data = safe_json(self.s.get(f"{PLATFORM}/dapi/me", params={"channel": "SAAndroid", "options": 613}, timeout=20))
-        return data.get("response") or {}
+        r = self.s.get(f"{PLATFORM}/dapi/me", params={"channel": "SAAndroid", "options": 613}, timeout=20)
+        data = safe_json(r)
+        response = data.get("response")
+        if r.status_code >= 400 or data.get("code") != 0 or not isinstance(response, dict):
+            detail = data.get("message") or data.get("error") or data.get("_raw") or str(data)[:150]
+            raise ValueError(f"App 面板读取失败（HTTP {r.status_code}，code={data.get('code')}）：{detail}")
+        return response
 
     def promotion(self, dash: dict, kind: str) -> dict | None:
         for p in dash.get("promotions") or []:
             attrs = p.get("attributes") or {}
-            if attrs.get("type") == kind:
+            if str(attrs.get("type") or "").lower() == kind:
                 return attrs
         return None
 
@@ -461,74 +550,202 @@ class App:
             headers={"Content-Type": "application/json"},
             timeout=20,
         )
-        return safe_json(r)
+        data = safe_json(r)
+        if r.status_code >= 400 or data.get("code") != 0:
+            detail = data.get("message") or data.get("error") or data.get("_raw") or str(data)[:150]
+            raise ValueError(f"活动上报失败（HTTP {r.status_code}，code={data.get('code')}）：{detail}")
+        response = data.get("response")
+        return response if isinstance(response, dict) else {}
 
     def check_in(self) -> str:
-        attrs = self.promotion(self.dashboard(), "checkin")
+        dash = self.dashboard()
+        attrs = self.promotion(dash, "checkin")
         if attrs is None:
             return "没有签到任务"
-        if str(attrs.get("complete")).lower() == "true":
+        if self.complete(attrs):
             return "今天已签到"
-        before = self.dashboard().get("balance")
+        before = self.number(dash.get("balance"))
         self.submit(103, {})
         time.sleep(2)
-        after = self.dashboard().get("balance")
-        if isinstance(before, int) and isinstance(after, int) and after > before:
-            return f"成功，+{after - before}"
-        return f"已提交，积分没变（{before} → {after}），可能今天已签到"
+        after_dash = self.dashboard()
+        after_attrs = self.promotion(after_dash, "checkin") or {}
+        after = self.number(after_dash.get("balance"))
+        gained = after - before if before is not None and after is not None else 0
+        if self.complete(after_attrs) or gained > 0:
+            return f"成功，+{gained}" if gained > 0 else "成功，任务状态已确认"
+        return f"已提交但未确认计分（{before} → {after}），请稍后核对面板"
 
     def read_to_earn(self) -> str:
-        attrs = self.promotion(self.dashboard(), "msnreadearn")
+        dash = self.dashboard()
+        attrs = self.promotion(dash, "msnreadearn")
         if attrs is None:
             return "没有阅读任务"
-        progress = int(attrs.get("pointprogress") or attrs.get("progress") or 0)
-        maximum = int(attrs.get("pointmax") or attrs.get("max") or 0)
-        offer_id = attrs.get("offerid") or "ENUS_readarticle3_30points"
-        if maximum and progress >= maximum:
-            return f"已完成 {progress}/{maximum}"
-        for _ in range(12):  # 每篇 3 分，最多 30 分；多给两次余量
-            self.submit(101, {"offerid": offer_id})
-            time.sleep(3)
-            attrs = self.promotion(self.dashboard(), "msnreadearn") or {}
-            progress = int(attrs.get("pointprogress") or attrs.get("progress") or 0)
-            if maximum and progress >= maximum:
+        progress = self.number(attrs.get("pointprogress") or attrs.get("progress")) or 0
+        maximum = self.number(attrs.get("pointmax") or attrs.get("max")) or 0
+        offer_id = str(attrs.get("offerid") or "ENUS_readarticle3_30points")
+        if self.complete(attrs):
+            return f"已完成 {progress}/{maximum or '?'}"
+        balance = self.number(dash.get("balance"))
+        delay = max(env_int("MSR_READ_DELAY", 3), 1)
+        attempts = 0
+        accepted = 0
+        earned = 0
+        stop_reason = ""
+        finished = False
+        # 每次都用进度或余额验证；无增长立即停止，不再机械地提交满 12 次。
+        for _ in range(20):
+            attempts += 1
+            try:
+                response = self.submit(101, {"offerid": offer_id})
+                time.sleep(delay)
+                after_dash = self.dashboard()
+            except Exception as e:  # 保留已获得进度，并把失败原因带回通知
+                stop_reason = f"第 {attempts} 次上报失败：{type(e).__name__}: {e}"
                 break
-        return f"{progress}/{maximum}"
+            after_attrs = self.promotion(after_dash, "msnreadearn")
+            if after_attrs is None:
+                stop_reason = "上报后任务从面板消失，无法确认"
+                break
+            after_balance = self.number(response.get("balance"))
+            if after_balance is None:
+                after_balance = self.number(after_dash.get("balance"))
+            gained = after_balance - balance if balance is not None and after_balance is not None else 0
+            new_progress = self.number(after_attrs.get("pointprogress") or after_attrs.get("progress"))
+            if new_progress is None:
+                new_progress = progress
+            progressed = new_progress > progress or gained > 0
+            if progressed:
+                accepted += 1
+                earned += max(gained, 0)
+            progress = new_progress
+            maximum = self.number(after_attrs.get("pointmax") or after_attrs.get("max")) or maximum
+            if after_balance is not None:
+                balance = after_balance
+            if self.complete(after_attrs):
+                finished = True
+                break
+            if not progressed:
+                stop_reason = "积分和进度均未增长，已停止无效上报"
+                break
+
+        status = "完成" if finished else "未完成"
+        detail = f"本次有效 {accepted}/{attempts} 篇，确认 +{earned} 分"
+        if stop_reason:
+            detail += f"，{stop_reason}"
+        return f"{status} {progress}/{maximum or '?'}（{detail}）"
+
+    def app_promotions(self) -> str:
+        """完成面板标记为 sapphire 的其他 App 点击活动；签到和阅读由专门流程处理。"""
+        dash = self.dashboard()
+        pending = []
+        for promotion in dash.get("promotions") or []:
+            attrs = promotion.get("attributes") or {}
+            if (
+                str(attrs.get("type") or "").strip().lower() == "sapphire"
+                and self.offer_id(promotion)
+                and not self.complete(attrs)
+            ):
+                pending.append(promotion)
+        if not pending:
+            return "没有待完成的 App 活动"
+
+        done = 0
+        earned = 0
+        left = []
+        for promotion in pending:
+            offer_id = self.offer_id(promotion)
+            before_attrs = promotion.get("attributes") or {}
+            before_progress = self.number(before_attrs.get("pointprogress") or before_attrs.get("progress")) or 0
+            before_balance = self.number(dash.get("balance"))
+            try:
+                self.submit(101, {"offerid": offer_id})
+                time.sleep(2)
+                dash = self.dashboard()
+            except Exception as e:
+                print(f"App 活动 {offer_id} 失败：{type(e).__name__}: {e}")
+                left.append(offer_id)
+                continue
+            current = next(
+                (p for p in dash.get("promotions") or [] if self.offer_id(p).lower() == offer_id.lower()),
+                None,
+            )
+            after_attrs = (current or {}).get("attributes") or {}
+            after_progress = self.number(after_attrs.get("pointprogress") or after_attrs.get("progress")) or 0
+            after_balance = self.number(dash.get("balance"))
+            gained = after_balance - before_balance if before_balance is not None and after_balance is not None else 0
+            if self.complete(after_attrs) or after_progress > before_progress or gained > 0:
+                done += 1
+                earned += max(gained, 0)
+            else:
+                left.append(offer_id)
+        text = f"确认完成 {done}/{len(pending)}"
+        if earned:
+            text += f"，+{earned} 分"
+        if left:
+            text += f"，未确认：{'、'.join(left[:5])}"
+        return text
 
 
 # ---------------------------------------------------------------- 主流程
 
+def run_step(result: list[tuple[str, object]], name: str, func: Callable[[], object]) -> None:
+    """单项失败只影响该项，避免后面的任务被一起跳过。"""
+    try:
+        result.append((name, func()))
+    except Exception as e:  # noqa: BLE001
+        print(f"{name}失败：{type(e).__name__}: {e}")
+        result.append((name, f"失败：{type(e).__name__}: {e}"))
+
+
 def handle(cookie: str, index: int) -> str:
     result: list[tuple[str, object]] = []
-    web = Web(cookie)
-    dash = web.userinfo()
-    start = web.points(dash)
-    level = ((dash.get("userStatus") or {}).get("levelInfo") or {}).get("activeLevel", "?")
-    result.append(("等级", level))
+    web = None
+    start = None
+    try:
+        web = Web(cookie)
+        dash = web.userinfo()
+        start = web.points(dash)
+        level = ((dash.get("userStatus") or {}).get("levelInfo") or {}).get("activeLevel", "?")
+        result.append(("等级", level))
+    except Exception as e:  # 网页登录态失败时仍尝试独立的 App 任务
+        print(f"网页端初始化失败：{type(e).__name__}: {e}")
+        result.append(("网页端", f"不可用：{type(e).__name__}: {e}"))
 
-    if env_bool("MSR_SEARCH", True):
-        words = hot_words()
-        delay = max(env_int("MSR_SEARCH_DELAY", 15), 5)
-        result.append(("电脑搜索", web.do_searches("pcSearch", False, words, delay)))
-        result.append(("手机搜索", web.do_searches("mobileSearch", True, words, delay)))
-    result.append(("每日活动", web.do_activities()))
+    if web is not None and start is not None:
+        if env_bool("MSR_SEARCH", True):
+            words = hot_words()
+            delay = max(env_int("MSR_SEARCH_DELAY", 15), 5)
+            # 两类搜索各自使用完整词表，不能让手机端继承电脑端 pop 后的剩余词。
+            run_step(result, "电脑搜索", lambda: web.do_searches("pcSearch", False, words.copy(), delay))
+            run_step(result, "手机搜索", lambda: web.do_searches("mobileSearch", True, words.copy(), delay))
+        run_step(result, "每日活动", web.do_activities)
 
     tokens = get_accounts("MSR_REFRESH_TOKEN")
     if index <= len(tokens):
         old = tokens[index - 1]
         app = App(old)
-        new = app.login()
-        if new != old:
-            saved = replace_env_value("MSR_REFRESH_TOKEN", old, new)
-            if not saved:
-                print(f"账号 {index} 的新 refresh token（请手动更新到 MSR_REFRESH_TOKEN）：\n{new}")
-        result.append(("App 签到", app.check_in()))
-        result.append(("阅读赚积分", app.read_to_earn()))
+        try:
+            new = app.login()
+            if new != old:
+                saved = replace_env_value("MSR_REFRESH_TOKEN", old, new)
+                if not saved:
+                    print(f"账号 {index} 的新 refresh token（请手动更新到 MSR_REFRESH_TOKEN）：\n{new}")
+            run_step(result, "App 签到", app.check_in)
+            run_step(result, "阅读赚积分", app.read_to_earn)
+            if env_bool("MSR_APP_PROMOTIONS", True):
+                run_step(result, "App 活动", app.app_promotions)
+        except Exception as e:  # token 失效只跳过 App，不影响已经完成的网页任务
+            print(f"App 登录失败：{type(e).__name__}: {e}")
+            result.append(("App 任务", f"登录失败：{type(e).__name__}: {e}"))
     else:
         result.append(("App 任务", "没有设置 MSR_REFRESH_TOKEN，跳过"))
 
-    end = web.points(web.userinfo())
-    result.append(("积分", f"{start} → {end}（+{end - start}）"))
+    if web is not None and start is not None:
+        try:
+            end = web.points(web.userinfo())
+            result.append(("积分", f"{start} → {end}（+{end - start}）"))
+        except Exception as e:
+            result.append(("积分", f"起始 {start}，结束余额读取失败：{type(e).__name__}: {e}"))
     return lines(result)
 
 

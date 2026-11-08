@@ -8,7 +8,7 @@
 | `checkin_workbuddy.py` | WorkBuddy「Buddy 加油站」每日签到领积分 | 每天 09:10 | `WB_TOKEN` |
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
 | `checkin_xiaoheihe.py` | 小黑盒签到 + 浏览/分享任务，汇报任务进度和 H 币 | 每天 08:45 | `XHH_COOKIE` |
-| `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读 | 每天 09:20 | `MSR_COOKIE` 等 |
+| `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读及其他 App 活动 | 每天 09:20 | `MSR_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
 
@@ -112,9 +112,11 @@ App 的 `hkey` 由客户端 native 代码计算，纯脚本算不了，所以脚
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MSR_COOKIE` | 无 | 用插件导出，见下面「获取 MSR_COOKIE」。多个账号用 `&&` 分隔。 |
-| `MSR_REFRESH_TOKEN` | 无 | 可选，用于 App 签到和阅读。在本地运行 `python tools/msr_token.py` 获取。多账号按 `MSR_COOKIE` 的顺序排。微软返回新 token 时，脚本自动写回这个变量（需要青龙 2.18+）。 |
+| `MSR_REFRESH_TOKEN` | 无 | 可选，用于 App 签到、阅读和其他 App 活动。在本地运行 `python tools/msr_token.py` 获取。多账号按 `MSR_COOKIE` 的顺序排。微软返回新 token 时，脚本自动写回这个变量（需要青龙 2.18+）。 |
 | `MSR_SEARCH` | `true` | `false` 时不做搜索。 |
 | `MSR_SEARCH_DELAY` | `15` | 两次搜索之间的秒数，最小 5。 |
+| `MSR_READ_DELAY` | `3` | 两次阅读上报之间的秒数，最小 1。 |
+| `MSR_APP_PROMOTIONS` | `true` | `false` 时跳过签到、阅读以外的其他 App 活动。 |
 
 #### 获取 MSR_COOKIE
 
@@ -132,9 +134,12 @@ rewards.bing.com 的会话 Cookie 很快过期，只复制请求头会一直报 
 
 | 任务 | 说明 |
 |---|---|
-| 电脑 / 手机搜索 | 在 cn.bing.com 搜百度、微博热搜词，按面板计数器搜到满分为止 |
-| 每日活动 | 点击类活动直接完成；测验类可能完成不了 |
-| App 签到、阅读赚积分 | 需要 `MSR_REFRESH_TOKEN` |
+| 电脑 / 手机搜索 | 在 cn.bing.com 搜百度、微博热搜词；检查上报结果，按面板计数器搜到满分为止 |
+| 每日活动 | 点击类活动直接完成；测验类可能完成不了；后置状态无法读取时标为「未确认」，不虚报完成 |
+| App 签到、阅读赚积分 | 需要 `MSR_REFRESH_TOKEN`；阅读按实际进度和余额停止，不再固定空跑 12 次 |
+| 其他 App 活动 | 自动处理面板中可上报的 `sapphire` 活动，可用 `MSR_APP_PROMOTIONS=false` 关闭 |
+
+单个任务失败不会中断同一账号的其他任务；网页 Cookie 失效时仍会尝试独立的 App 任务。
 
 ## 安全
 
