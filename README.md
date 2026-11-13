@@ -9,6 +9,7 @@
 | `checkin_bilibili.py` | B站漫画签到、直播签到、观看、分享，可选投币 | 每天 08:30 | `BILI_COOKIE` 等 |
 | `checkin_xiaoheihe.py` | 小黑盒签到 + 浏览/分享任务，汇报任务进度和 H 币 | 每天 08:45 | `XHH_COOKIE` |
 | `checkin_msrewards.py` | Microsoft Rewards 国区：搜索、每日活动、App 签到、阅读及其他 App 活动 | 每天 09:20 | `MSR_COOKIE` 等 |
+| `checkin_nodeseek.py` | NodeSeek / DeepFlood 每日签到领鸡腿 | 每天 00:07 | `NS_COOKIE` 等 |
 
 `qlutils.py` 是公共模块，不是任务。
 
@@ -22,7 +23,7 @@ ql repo https://github.com/f1shQAQ/ql-scripts.git "checkin_" "" "qlutils" "main"
 
 参数依次是：仓库地址、白名单（只把 `checkin_` 开头的文件建成任务）、黑名单、依赖文件、分支、文件后缀。
 
-依赖：在「依赖管理 → Python3」里添加 `requests`（青龙一般自带）。可选装 `curl_cffi`，Microsoft Rewards 脚本会用它伪装 TLS 指纹。
+依赖：在「依赖管理 → Python3」里添加 `requests`（青龙一般自带）。可选装 `curl_cffi`，Microsoft Rewards 脚本会用它伪装 TLS 指纹；NodeSeek 脚本没有它基本过不了 Cloudflare，要用就必须装。
 
 推送：默认走面板「系统设置 → 通知设置」（需要青龙 2.18+）。这条推送失败时，改用青龙自带的 `notify.py`，它读「配置文件」里的 `TG_BOT_TOKEN`、`PUSH_KEY` 等变量。用环境变量 `QL_NOTIFY_MODE` 可以改推送方式：
 
@@ -182,6 +183,19 @@ python tools/msr_probe.py cookies.json     # 也可以 MSR_COOKIE='...' python t
 
 需要说明的是：TLS 指纹（JA3/JA4）由客户端决定，只靠请求头改不了；装了 `curl_cffi` 才有改善。以上都只是降低特征，**不能保证不被风控**，介意风险就别跑。
 
+### NodeSeek / DeepFlood
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `NS_COOKIE` | 无 | 浏览器登录 nodeseek.com，用 Cookie-Editor 导出 Header String 或 JSON，或者在 F12 → 网络里复制 `Cookie` 请求头。多个账号用换行或 `&&` 分隔（JSON 之间只能用 `&&`）。 |
+| `DF_COOKIE` | 无 | deepflood.com 的 Cookie，可选，格式同上。 |
+| `NS_UA` | 无 | 导出 Cookie 的那个浏览器的 User-Agent，强烈建议填：在那个浏览器的控制台运行 `navigator.userAgent`，复制结果。所有账号共用。 |
+| `NS_RANDOM` | `true` | `true` 随机鸡腿，`false` 固定 5 个。 |
+
+- 需要在「依赖管理 → Python3」里装 `curl_cffi`。脚本按 `NS_UA` 选 Chrome / Edge / Firefox / Safari 的 TLS 指纹，并补齐一致的 `Sec-Ch-Ua` 请求头。
+- Cookie 里的 `cf_clearance` 绑定导出时的 IP 和 UA。青龙所在机器和浏览器走同一个出口 IP（比如都在家里内网）时最稳；IP 不同就可能被拦，日志会显示「被 Cloudflare 拦截」。
+- 签到 0 点刷新，默认定时 00:07。当天已签到的账号记为成功（☑️）。
+
 ## 安全
 
 - Cookie 等于账号登录态。只放在青龙的环境变量里，不要提交到这个仓库。
@@ -196,4 +210,4 @@ BAIDUWP_COOKIE="..." python checkin_baiduwp.py
 
 ## 致谢
 
-接口参考 [Sitoi/dailycheckin](https://github.com/Sitoi/dailycheckin)（MIT）、[SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) 和 [yowiv08/heybox](https://github.com/yowiv08/heybox)。小黑盒 Web 端签名算法来自 [foxlesbiao/xiaoheihe-mcp](https://github.com/foxlesbiao/xiaoheihe-mcp) 和公开的逆向分析。
+接口参考 [Sitoi/dailycheckin](https://github.com/Sitoi/dailycheckin)（MIT）、[NodeSeek Pro 油猴脚本](https://greasyfork.org/zh-CN/scripts/567109-nodeseek-pro)（GPL-3.0）、[SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) 和 [yowiv08/heybox](https://github.com/yowiv08/heybox)。小黑盒 Web 端签名算法来自 [foxlesbiao/xiaoheihe-mcp](https://github.com/foxlesbiao/xiaoheihe-mcp) 和公开的逆向分析。
