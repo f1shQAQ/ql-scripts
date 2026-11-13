@@ -12,6 +12,8 @@ NodeSeek / DeepFlood 每日签到领鸡腿。
     NS_UA       导出 Cookie 的那个浏览器的 User-Agent，可选但强烈建议填，所有账号共用。
                 cf_clearance 绑定 UA，UA 对不上会被 Cloudflare 拦。
     NS_RANDOM   "true" 随机鸡腿（默认），"false" 固定 5 个。
+    NS_PROXY    签到请求走的代理，默认 http://127.0.0.1:20171（v2rayA 的 HTTP 端口）。
+                填 "off" 不走代理直连。
 
 依赖：curl_cffi（模拟浏览器 TLS 指纹过 Cloudflare）。没装时退回 requests，大概率被拦。
 
@@ -42,6 +44,7 @@ SITES = {
     "NodeSeek": ("NS_COOKIE", "https://www.nodeseek.com"),
     "DeepFlood": ("DF_COOKIE", "https://www.deepflood.com"),
 }
+DEFAULT_PROXY = "http://127.0.0.1:20171"
 ALREADY_RE = re.compile(r"已完成签到|重复|already", re.I)
 
 
@@ -83,6 +86,15 @@ def browser_profile(ua: str) -> tuple[str, dict[str, str]]:
 IMPERSONATE, UA_HEADERS = browser_profile(os.getenv("NS_UA", ""))
 
 
+def get_proxy() -> str:
+    """NS_PROXY 没设置时用默认代理，"off" / "none" / "false" 表示直连。"""
+    value = os.getenv("NS_PROXY", "").strip() or DEFAULT_PROXY
+    return "" if value.lower() in {"off", "none", "false", "0"} else value
+
+
+PROXY = get_proxy()
+
+
 def to_header(text: str, base: str) -> str:
     """JSON 导出 / cookies.txt / 请求头统一转成请求头字符串。"""
     cookies = parse_cookie_export(text, base.split("//", 1)[1])
@@ -103,6 +115,8 @@ def checkin(base: str, cookie: str, random: bool) -> tuple[str, str]:
         "Content-Type": "application/json",
     }
     kw = {"impersonate": IMPERSONATE} if HAS_CURL else {}
+    if PROXY:
+        kw["proxies"] = {"http": PROXY, "https": PROXY}
     if not HAS_CURL and "User-Agent" not in headers:
         headers["User-Agent"] = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -114,6 +128,8 @@ def checkin(base: str, cookie: str, random: bool) -> tuple[str, str]:
             r = http.post(url, headers=headers, timeout=30, **kw)
         except Exception as e:  # noqa: BLE001  网络错误，重试
             last = f"请求异常：{e}"
+            if PROXY:
+                last += f"（代理 {PROXY} 是否可用？不需要代理就设 NS_PROXY=off）"
         else:
             try:
                 data = r.json()
@@ -143,6 +159,7 @@ def checkin(base: str, cookie: str, random: bool) -> tuple[str, str]:
 
 def main() -> None:
     print(f"传输层：{'curl_cffi（' + IMPERSONATE + ' 指纹）' if HAS_CURL else 'requests（未装 curl_cffi）'}")
+    print(f"代理：{PROXY or '不走代理'}")
     random = env_bool("NS_RANDOM", True)
     results: list[str] = []
     failed = total = 0

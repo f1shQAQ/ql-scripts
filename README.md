@@ -191,6 +191,9 @@ python tools/msr_probe.py cookies.json     # 也可以 MSR_COOKIE='...' python t
 | `DF_COOKIE` | 无 | deepflood.com 的 Cookie，可选，格式同上。 |
 | `NS_UA` | 无 | 导出 Cookie 的那个浏览器的 User-Agent，强烈建议填：在那个浏览器的控制台运行 `navigator.userAgent`，复制结果。所有账号共用。 |
 | `NS_RANDOM` | `true` | `true` 随机鸡腿，`false` 固定 5 个。 |
+| `NS_PROXY` | `http://127.0.0.1:20171` | 签到请求走的代理。默认是 v2rayA 的 HTTP 端口；填其他地址可改用别的代理，支持 `http://` 和 `socks5://`；填 `off` 不走代理直连。 |
+
+**关于默认代理**：脚本默认把签到请求发到 `127.0.0.1:20171`。不需要代理时，必须设 `NS_PROXY=off`，否则会报「代理是否可用」。青龙跑在 Docker 里时，`127.0.0.1` 指的是容器自己，不是宿主机：容器用 `host` 网络模式时默认值才能直接用，否则要把 `NS_PROXY` 改成宿主机的局域网 IP（如 `http://192.168.1.10:20171`），并让 v2rayA 允许局域网连接。代理的出口 IP 最好和导出 Cookie 时浏览器的出口 IP 一致，因为 `cf_clearance` 绑定 IP。
 
 - 需要在「依赖管理 → Python3」里装 `curl_cffi`。脚本按 `NS_UA` 选 Chrome / Edge / Firefox / Safari 的 TLS 指纹，并补齐一致的 `Sec-Ch-Ua` 请求头。
 - Cookie 里的 `cf_clearance` 绑定导出时的 IP 和 UA。青龙所在机器和浏览器走同一个出口 IP（比如都在家里内网）时最稳；IP 不同就可能被拦，日志会显示「被 Cloudflare 拦截」。
